@@ -1,0 +1,804 @@
+-- =========================================================================
+-- ESQUEMA INICIAL DE BASE DE DATOS - ANOMALIA PROJECT (ABM & INFRAESTRUCTURA)
+-- =========================================================================
+
+-- 1. Crear tabla de roles primero por la clave foránea
+CREATE TABLE IF NOT EXISTS roles (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(50) UNIQUE NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. Crear tabla de perfiles de acceso
+CREATE TABLE IF NOT EXISTS profiles (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. Tabla intermedia para la relación N a M entre roles y perfiles
+CREATE TABLE IF NOT EXISTS role_profiles (
+    role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,
+    profile_id INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+    PRIMARY KEY (role_id, profile_id)
+);
+
+-- 4. Crear tabla de tenants (entornos, proyectos o cuentas de VictoriaMetrics/VictoriaLogs/Pyroscope)
+CREATE TABLE IF NOT EXISTS tenants (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL,      -- Ej: 'METRICS', 'TRACES', 'PROFILES', 'AUDIT_LOGS'
+    type VARCHAR(50) DEFAULT 'metrics',     -- Tipo de tenant: 'metrics', 'traces', 'profiles', 'logs'
+    account_id INTEGER,                     -- AccountID para VictoriaMetrics/Logs (NULL si no aplica)
+    project_id INTEGER,                     -- ProjectID para VictoriaMetrics/Logs (NULL si no aplica)
+    environment VARCHAR(50),                -- Ej: 'work', 'live', 'play', 'default'
+    port INTEGER DEFAULT 8427,              -- Puerto de escucha del servicio (ej: vmauth, vm, vlogs, pyroscope)
+    description TEXT,
+    -- Identidad estable del tenant (spec 011). slug es kebab-case, único e
+    -- inmutable tras la creación; da nombre a la unidad systemd del vmalert
+    -- (anomalia-vmalert-<slug>.service) y al directorio de reglas.
+    slug VARCHAR(100) UNIQUE,
+    display_name VARCHAR(150),
+    -- Nodo que aloja la instancia vmalert 1:1 del tenant. La FK se añade al
+    -- final del script (bloque 8c) porque infrastructure_nodes se crea después.
+    instance_id INTEGER,
+    vmalert_node_id INTEGER,
+    vmalert_port INTEGER,
+    -- Nodo vmauth donde se materializa la ruta del tenant y su placement (spec 011 §4.10).
+    vmauth_node_id INTEGER,
+    vmauth_placement_mode VARCHAR(10) DEFAULT 'manual' CHECK (vmauth_placement_mode IN ('manual','auto')),
+    has_alerts BOOLEAN DEFAULT FALSE,
+    placement_mode VARCHAR(10) DEFAULT 'manual' CHECK (placement_mode IN ('manual','auto')),
+    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('provisioning','active','deleting','error','deleted_cleanup')),
+    org_id_upper VARCHAR(100) UNIQUE,       -- Valor de X-Scope-OrgID, derivado del slug en UPPER
+    -- Marca el tenant cuya telemetría es pista de auditoría. No basta con el
+    -- type ('logs'): AUDIT_LOGS también es de tipo logs y sin esta bandera
+    -- aparecía duplicado en la pestaña Logs y ausente de la de Auditoría.
+    is_audit BOOLEAN NOT NULL DEFAULT false,
+    -- Hard-delete explícito en 2 pasos: deleted_at marca el borrado lógico y
+    -- deletion_* la evidencia de las dos confirmaciones.
+    deleted_at TIMESTAMP,
+    deletion_confirmed_at TIMESTAMP,
+    deletion_confirmed_by INTEGER,
+    deletion_challenge_id VARCHAR(64),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4.1 Tabla que define el endpoint de LECTURA de cada tenant (base de los datasources de Perses).
+-- tenants.port es el puerto de INSERCIÓN y no permite derivar la URL de lectura, por eso
+-- se modela aparte. scoping indica cómo se aísla el tenant en el backend Victoria.
+CREATE TABLE IF NOT EXISTS tenant_datasources (
+    tenant_id INTEGER PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    kind VARCHAR(50) NOT NULL,              -- Backend de almacenamiento: VictoriaMetrics | VictoriaLogs | VictoriaTraces | Pyroscope
+    read_url TEXT NOT NULL,                 -- URL base del backend de lectura
+    scoping VARCHAR(20) NOT NULL DEFAULT 'header',  -- 'path' = prefijo /select/a:p/ | 'header' = AccountID/ProjectID
+    account_id INTEGER,                     -- Valor de aislamiento (NULL si no aplica)
+    project_id INTEGER,                     -- Valor de aislamiento (NULL si no aplica)
+    org_id VARCHAR(255),                    -- Valor de X-Scope-OrgID (solo tipo profiles)
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. Tabla intermedia para asociar roles a múltiples tenants (Relación N a M)
+CREATE TABLE IF NOT EXISTS role_tenants (
+    role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,
+    tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+    PRIMARY KEY (role_id, tenant_id)
+);
+
+-- 6. Crear tabla de usuarios
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    avatar_url TEXT DEFAULT '',
+    theme VARCHAR(50) DEFAULT 'theme-enterprise-blue',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tenants_account_project_active ON tenants(account_id, project_id) WHERE status='active' AND deleted_at IS NULL;
+
+-- 7. Tabla intermedia para permitir múltiples roles por usuario (N a M)
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, role_id)
+);
+
+-- 8. Tabla intermedia para asignación directa de tenants por usuario (N a M)
+-- Debe declararse después de 'users' por la clave foránea.
+CREATE TABLE IF NOT EXISTS user_tenants (
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, tenant_id)
+);
+
+-- Índices de acceso a tenants por usuario
+CREATE INDEX IF NOT EXISTS idx_user_tenants_user_id ON user_tenants(user_id);
+
+-- 8b. Tablas para ciclo de vida vmalert por tenant + jobs + puertos + auditoría (spec 011)
+
+CREATE TABLE IF NOT EXISTS tenant_vmalert_instances (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER UNIQUE NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    instance_id INTEGER NOT NULL,          -- FK añadida en el bloque 8c
+    port INTEGER NOT NULL,
+    service VARCHAR(20) DEFAULT 'vmalert',
+    unit_name VARCHAR(150) NOT NULL,
+    rules_path VARCHAR(255) NOT NULL,
+    rules_yaml TEXT,                 -- fuente de verdad de reglas vmalert (spec 011/012)
+    status VARCHAR(20) DEFAULT 'deployed' CHECK (status IN ('creating','deploying','deployed','error','stopped','undeployed')),
+    health VARCHAR(10) DEFAULT 'unknown' CHECK (health IN ('ok','degraded','down','unknown')),
+    last_deployed_at TIMESTAMP,
+    enabled BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_tvi_instance_port UNIQUE (instance_id, port)
+);
+
+-- Migración idempotente para BD existentes (el entrypoint initdb solo corre en
+-- la primera creación del volumen; este ALTER cubre reintentos posteriores).
+ALTER TABLE tenant_vmalert_instances ADD COLUMN IF NOT EXISTS rules_yaml TEXT;
+-- spec 011 §4.7: tenants de control interno con reglas canónicas inmutables.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS is_internal BOOLEAN DEFAULT FALSE;
+-- spec 011 §4.10: nodo vmauth por tenant y su placement (manual/auto).
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS vmauth_node_id INTEGER;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS vmauth_placement_mode VARCHAR(10) DEFAULT 'manual';
+
+CREATE TABLE IF NOT EXISTS port_mapping (
+    id SERIAL PRIMARY KEY,
+    instance_id INTEGER NOT NULL,          -- FK añadida en el bloque 8c
+    tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
+    service VARCHAR(20),
+    host_port INTEGER NOT NULL,
+    container_port INTEGER,
+    proto VARCHAR(5) DEFAULT 'tcp',
+    purpose VARCHAR(50),
+    expires_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_portmap_instance_host UNIQUE (instance_id, host_port)
+);
+
+CREATE TABLE IF NOT EXISTS audit_deletions (
+    id SERIAL PRIMARY KEY,
+    -- spec 011 §4.11: la baja PURGA la fila del tenant; la evidencia de auditoría
+    -- sobrevive de-identificada (tenant_id=NULL) con el slug en tenant_slug.
+    tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_slug VARCHAR(100),
+    actor INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    reason TEXT,
+    ip VARCHAR(45),
+    user_agent VARCHAR(255),
+    challenge_id VARCHAR(64) NOT NULL UNIQUE,
+    confirm_step1_at TIMESTAMP,
+    confirm_step2_at TIMESTAMP,
+    outcome VARCHAR(15) DEFAULT 'pending' CHECK (outcome IN ('pending','completed','expired','cancelled','rolled_back')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Migración idempotente (spec 011 §4.11): purga del tenant sin perder auditoría.
+ALTER TABLE audit_deletions ADD COLUMN IF NOT EXISTS tenant_slug VARCHAR(100);
+ALTER TABLE audit_deletions ALTER COLUMN tenant_id DROP NOT NULL;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'audit_deletions_tenant_id_fkey'
+          AND conrelid = 'audit_deletions'::regclass
+    ) THEN
+        ALTER TABLE audit_deletions DROP CONSTRAINT audit_deletions_tenant_id_fkey;
+    END IF;
+    ALTER TABLE audit_deletions
+        ADD CONSTRAINT audit_deletions_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE SET NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS job_state (
+    id VARCHAR(36) PRIMARY KEY,
+    type VARCHAR(30),
+    ref_id INTEGER,
+    status VARCHAR(12) DEFAULT 'queued' CHECK (status IN ('queued','running','succeeded','failed','cancelled')),
+    phase VARCHAR(30),
+    progress_pct INTEGER DEFAULT 0,
+    logs_ref TEXT,
+    error_code VARCHAR(50),
+    result JSONB,
+    -- Extra-vars de entrada del job (spec 011 §4.11): p.ej. {'components':['vmagent']}
+    -- o {'skip_regen':true} para la baja secuencial.
+    payload JSONB,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    timeout_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_job_state_type_status ON job_state(type, status);
+CREATE INDEX IF NOT EXISTS idx_job_state_ref_id ON job_state(ref_id);
+CREATE INDEX IF NOT EXISTS idx_job_state_created_at ON job_state(created_at);
+-- spec 011 §4.11: extra-vars de entrada del job (components/skip_regen).
+ALTER TABLE job_state ADD COLUMN IF NOT EXISTS payload JSONB;
+-- spec 011 §4.11: logs_ref pasa a TEXT (antes VARCHAR(255)) para no truncar el
+-- diagnostico de fallos (p. ej. el SSH UNREACHABLE de la reconciliacion).
+ALTER TABLE job_state ALTER COLUMN logs_ref TYPE TEXT;
+-- spec 016: pasos visibles del job (lista de {name,status,detail}) para la UI.
+ALTER TABLE job_state ADD COLUMN IF NOT EXISTS steps JSONB;
+-- spec 016 §2.4: latido del job en ejecución; un 'running' con heartbeat viejo se
+-- considera huérfano (proceso muerto) y se recupera al arrancar el ejecutor.
+ALTER TABLE job_state ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP;
+
+-- spec 016: snapshot previo a un import de backup para poder revertir TODO
+-- (filas de BD + reconciliacion remota) si la reconciliacion falla. Se elimina
+-- al exito; en fallo queda como auditoria.
+CREATE TABLE IF NOT EXISTS backup_import_state (
+    job_id VARCHAR(36) PRIMARY KEY,
+    snapshot JSONB NOT NULL,
+    preexisting_tenant_ids INTEGER[] NOT NULL DEFAULT '{}',
+    imported_pks JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- spec 017: notificaciones genéricas por usuario (campana in-app + email). El
+-- resultado terminal de cualquier job con created_by genera una notificación.
+CREATE TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type VARCHAR(50),
+    title VARCHAR(255) NOT NULL,
+    body TEXT,
+    job_id VARCHAR(36),
+    link VARCHAR(255),
+    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
+
+-- spec 019: solicitudes de acceso (roles y/o tenants) con flujo de aprobación.
+-- Un usuario autenticado pide roles/tenants indicando un motivo; un usuario con
+-- perfil 'approvers' aprueba o rechaza. Al aprobar se da de alta de forma aditiva
+-- (unión) en user_roles y user_tenants. Los nombres se guardan como JSONB porque
+-- la solicitud es un borrador y no debe romper si el rol/tenant se borra antes de
+-- resolverse.
+CREATE TABLE IF NOT EXISTS access_requests (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    requested_roles JSONB NOT NULL DEFAULT '[]',
+    requested_tenants JSONB NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','approved','rejected','cancelled')),
+    reviewer_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    review_note TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_access_requests_status ON access_requests(status);
+CREATE INDEX IF NOT EXISTS idx_access_requests_user ON access_requests(user_id);
+
+
+-- 9. Crear tabla de sesiones para validación por session_id
+CREATE TABLE IF NOT EXISTS sessions (
+    id SERIAL PRIMARY KEY,
+    session_id VARCHAR(255) UNIQUE NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Índices de rendimiento para sesiones
+CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+
+-- Tickets de un solo uso para abrir la UI de Victoria de un tenant.
+-- El token JWT vive en localStorage y no viaja en la navegacion, asi que el
+-- frontend canjea un ticket opaco por la sesion y navega a la UI con el.
+-- El tenant y el usuario se congelan aqui: la UI servida no vuelve a consultar
+-- la autorizacion, por lo que el ticket caduca a los pocos minutos.
+CREATE TABLE IF NOT EXISTS ui_tickets (
+    id SERIAL PRIMARY KEY,
+    ticket VARCHAR(128) UNIQUE NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- NULL para el scope 'alertmanager_global': es la unica consola sin tenant
+    -- (UI de administracion global). Ver specs/011 §5.7.
+    tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+    -- Alcance de la tarjeta que emitio el ticket (UI_SCOPE_PROFILE). Determina el
+    -- upstream al que se monta la consola: los scopes de Victoria van a su UI,
+    -- "dashboards" va a Parses. Ver specs/010.
+    scope VARCHAR(32) NOT NULL DEFAULT 'metrics',
+    expires_at TIMESTAMP NOT NULL,
+    consumed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ui_tickets_ticket ON ui_tickets(ticket);
+CREATE INDEX IF NOT EXISTS idx_ui_tickets_expires ON ui_tickets(expires_at);
+
+-- =========================================================================
+-- DATOS INICIALES (SEEDERS)
+-- =========================================================================
+
+-- Insertar roles base actualizados del sistema (incluyendo infra_manager y approvers)
+INSERT INTO roles (name, description) VALUES 
+('admin', 'Control total del sistema, OIDC, IA y ABM'),
+('viewer', 'Visualización general de métricas, trazas, logs y perfiles de lectura'),
+('auditor', 'Acceso de solo lectura a auditoría y logs'),
+('tenant_manager', 'Gestión y aprovisionamiento de tenants en VictoriaMetrics y VictoriaLogs'),
+('user_manager', 'Gestión integral de usuarios y perfiles de acceso'),
+('role_manager', 'Gestión y asignación de roles y perfiles'),
+('infra_manager', 'Gestión y control de la infraestructura y componentes de red'),
+('approvers', 'Gestión de aprobaciones del sistema')
+ON CONFLICT (name) DO NOTHING;
+
+-- Insertar perfiles base por sección del panel de control (incluyendo approvers y audit)
+INSERT INTO profiles (code, name, description) VALUES 
+('users_manager', 'Gestión de Usuarios', 'Permite crear, modificar, activar y dar de baja usuarios'),
+('roles_manager', 'Gestión de Roles', 'Permite administrar y configurar los roles del sistema'),
+('profile_manager', 'Gestión de Perfiles', 'Permite administrar y asignar perfiles de acceso'),
+('access_metrics', 'Acceso a Métricas', 'Permite ver dashboards y métricas de infraestructura (Time Series)'),
+('access_logs', 'Acceso a Logs', 'Permite consultar y analizar los registros de eventos'),
+('access_Continuous_Profiling', 'Acceso a Continuous Profiling', 'Permite ver el perfilado continuo de aplicaciones y servicios'),
+('access_traces', 'Acceso a Trazas', 'Permite visualizar y analizar trazas distribuidas'),
+('access_alerts', 'Acceso a Alertas', 'Permite visualizar el flujo de alertas y diagnósticos de IA'),
+('access_dasboards', 'Acceso a Dashboards', 'Permite abrir la UI de Parses con los dashboards del tenant'),
+('tenants_manager', 'Gestión de Tenants', 'Permite dar de alta y administrar AccountID y ProjectID'),
+('alerts_manager', 'Gestión de Alertas', 'Permite configurar, silenciar y administrar reglas de alertas'),
+('infra_manager', 'Gestión de Infraestructura', 'Permite administrar nodos, componentes y OIDC'),
+('admin', 'Administración Global', 'Control total de configuración general, OIDC y ABM'),
+('approvers', 'Aprobaciones', 'Permite gestionar y aprobar solicitudes en el sistema'),
+('audit', 'Auditoría', 'Permite realizar tareas de auditoría y revisión de registros')
+ON CONFLICT (code) DO NOTHING;
+
+-- Asignar perfiles por defecto a los roles
+-- 1. admin (Todos los perfiles)
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'admin'
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- 2. viewer (Métricas, logs, profiling, trazas y alertas)
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'viewer' AND p.code IN ('access_metrics', 'access_logs', 'access_Continuous_Profiling', 'access_traces', 'access_alerts', 'access_dasboards')
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- 3. auditor (Modificado: únicamente perfil 'audit')
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'auditor' AND p.code IN ('audit')
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- 4. tenant_manager (Tenants, métricas y logs)
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'tenant_manager' AND p.code IN ('tenants_manager', 'access_metrics', 'access_logs')
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- 5. user_manager (Usuarios y perfiles)
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'user_manager' AND p.code IN ('users_manager', 'profile_manager')
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- 6. role_manager (Roles y perfiles)
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'role_manager' AND p.code IN ('roles_manager', 'profile_manager')
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- 7. infra_manager (Asociación del perfil infra_manager)
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'infra_manager' AND p.code = 'infra_manager'
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- 8. approvers (Asociación del perfil approvers)
+INSERT INTO role_profiles (role_id, profile_id)
+SELECT r.id, p.id FROM roles r, profiles p 
+WHERE r.name = 'approvers' AND p.code = 'approvers'
+  AND NOT EXISTS (
+      SELECT 1 FROM role_profiles rp WHERE rp.role_id = r.id AND rp.profile_id = p.id
+  );
+
+-- Insertar tenants sincronizados exactamente con vmauth.yml.j2
+-- spec 011: el slug es la identidad estable del tenant. Sin el, el paso 2 del
+-- hard-delete (confirm_text == tenants.slug) seria imposible de satisfacer en
+-- los tenants sembrados aqui, y el nombre de la unidad systemd
+-- anomalia-vmalert-<slug>.service quedaria indefinido.
+INSERT INTO tenants (name, slug, display_name, org_id_upper, type, account_id, project_id, environment, port, description, is_audit, has_alerts, is_internal, placement_mode) VALUES 
+('METRICS', 'metrics', 'METRICS', 'METRICS', 'metrics', 0, 0, 'default', 8400, 'Tenant para métricas de infraestructura (VictoriaMetrics - vminsert)', false, true, true, 'auto'),
+('TRACES', 'traces', 'TRACES', 'TRACES', 'traces', 0, 1, 'default', 8490, 'Tenant para trazas distribuidas OTLP (VictoriaTraces - vtinsert)', false, true, true, 'auto'),
+('PROFILES', 'profiles', 'PROFILES', 'PROFILES', 'profiles', NULL, NULL, 'default', 4040, 'Tenant de perfilado continuo vía Pyroscope (X-Scope-OrgID: PROFILES)', false, true, true, 'auto'),
+('AUDIT_LOGS', 'audit-logs', 'AUDIT_LOGS', 'AUDIT-LOGS', 'logs', 0, 3, 'default', 8480, 'Tenant para logs de auditoría (VictoriaLogs - vlinsert)', true, true, true, 'auto')
+ON CONFLICT (name) DO UPDATE SET 
+    type = EXCLUDED.type,
+    account_id = EXCLUDED.account_id,
+    project_id = EXCLUDED.project_id,
+    port = EXCLUDED.port,
+    description = EXCLUDED.description,
+    is_audit = EXCLUDED.is_audit,
+    -- spec 011 §4.7: los tenants de control interno corren vmalert siempre-on
+    -- (has_alerts/is_internal/placement_mode se fuerzan en cada deploy, de modo
+    -- que el flag nunca depende de un estado previo de la instalacion).
+    has_alerts = TRUE,
+    is_internal = TRUE,
+    placement_mode = 'auto',
+    -- Backfill idempotente: solo rellena los NULL de instalaciones previas a
+    -- la spec 011, nunca pisa un slug ya establecido (es inmutable).
+    slug = COALESCE(tenants.slug, EXCLUDED.slug),
+    display_name = COALESCE(tenants.display_name, EXCLUDED.display_name),
+    org_id_upper = COALESCE(tenants.org_id_upper, EXCLUDED.org_id_upper);
+
+-- Definir el endpoint de lectura de cada tenant a partir de los nodos select del inventario.
+-- El tenant se empareja por nombre, de modo que el seed es idempotente y sobrevive a un
+-- destroy/redeploy sin duplicar filas.
+--
+-- Nota sobre 'kind': identifica el backend de almacenamiento, NO el formato de la API.
+--   METRICS      -> VictoriaMetrics,  API Prometheus  (prefijo /select/<a>:<p>/prometheus)
+--   AUDIT_LOGS   -> VictoriaLogs,     API LogsQL     (scoping por headers)
+--   PROFILES     -> Pyroscope,        API /pyroscope/render
+--   TRACES       -> VictoriaTraces,   API compatible con Jaeger (/select/jaeger/api/*);
+--                   se llama VictoriaTraces porque ese es el componente desplegado. No hay
+--                   ningun componente Jaeger en el stack. VictoriaTraces NO expone la API
+--                   de Tempo (/api/v2/...), por lo que el plugin Tempo de Perses no aplica.
+{% set vm_sel_nodes = groups.get('vm_select_nodes', []) %}
+{% set vl_sel_nodes = groups.get('vlogs_select_nodes', []) %}
+{% set vt_sel_nodes = groups.get('vt_select_nodes', []) %}
+{% set pyro_nodes = groups.get('pyroscope_nodes', []) %}
+{% set vm_sel = hostvars[vm_sel_nodes[0]] if vm_sel_nodes else {'vmselect_ip': '127.0.0.1', 'vmselect_port': '8401'} %}
+{% set vl_sel = hostvars[vl_sel_nodes[0]] if vl_sel_nodes else {'vlselect_ip': '127.0.0.1', 'vlselect_port': '8481'} %}
+{% set vt_sel = hostvars[vt_sel_nodes[0]] if vt_sel_nodes else {'vtselect_ip': '127.0.0.1', 'vtselect_port': '8491'} %}
+{% set pyro   = hostvars[pyro_nodes[0]] if pyro_nodes else {'pyroscope_ip': '127.0.0.1', 'pyroscope_port': '4040'} %}
+INSERT INTO tenant_datasources (tenant_id, kind, read_url, scoping, account_id, project_id, org_id, enabled)
+SELECT t.id, v.kind, v.read_url, v.scoping, v.account_id, v.project_id, v.org_id, TRUE
+FROM tenants t
+JOIN (VALUES
+    ('METRICS',     'VictoriaMetrics', 'http://{{ vm_sel.vmselect_ip | default(vm_sel.ansible_host) }}:{{ vm_sel.vmselect_port }}', 'path',   0, 0, NULL),
+    ('AUDIT_LOGS',  'VictoriaLogs', 'http://{{ vl_sel.vlselect_ip | default(vl_sel.ansible_host) }}:{{ vl_sel.vlselect_port }}',     'header', 0, 3, NULL),
+    ('PROFILES',    'Pyroscope',    'http://{{ pyro.pyroscope_ip | default(pyro.ansible_host) }}:{{ pyro.pyroscope_port }}',         'header', NULL, NULL, 'PROFILES'),
+    ('TRACES',      'VictoriaTraces', 'http://{{ vt_sel.vtselect_ip | default(vt_sel.ansible_host) }}:{{ vt_sel.vtselect_port }}', 'header', 0, 1, NULL)
+) AS v(tenant_name, kind, read_url, scoping, account_id, project_id, org_id)
+  ON v.tenant_name = t.name
+ON CONFLICT (tenant_id) DO UPDATE SET
+    kind = EXCLUDED.kind,
+    read_url = EXCLUDED.read_url,
+    scoping = EXCLUDED.scoping,
+    account_id = EXCLUDED.account_id,
+    project_id = EXCLUDED.project_id,
+    org_id = EXCLUDED.org_id,
+    enabled = TRUE;
+
+-- Asignar acceso a todos los tenants al rol 'admin' por defecto
+INSERT INTO role_tenants (role_id, tenant_id)
+SELECT r.id, t.id FROM roles r, tenants t 
+WHERE r.name = 'admin'
+  AND NOT EXISTS (
+      SELECT 1 FROM role_tenants rt WHERE rt.role_id = r.id AND rt.tenant_id = t.id
+  );
+
+-- Asignar acceso a tenants de trabajo al rol 'tenant_manager'
+INSERT INTO role_tenants (role_id, tenant_id)
+SELECT r.id, t.id FROM roles r, tenants t 
+WHERE r.name = 'tenant_manager' AND (t.environment = 'work' OR t.environment = 'default')
+  AND NOT EXISTS (
+      SELECT 1 FROM role_tenants rt WHERE rt.role_id = r.id AND rt.tenant_id = t.id
+  );
+
+-- Asignar acceso al tenant AUDIT_LOGS exclusivamente al rol 'auditor'
+INSERT INTO role_tenants (role_id, tenant_id)
+SELECT r.id, t.id FROM roles r, tenants t 
+WHERE r.name = 'auditor' AND t.name = 'AUDIT_LOGS'
+  AND NOT EXISTS (
+      SELECT 1 FROM role_tenants rt WHERE rt.role_id = r.id AND rt.tenant_id = t.id
+  );
+
+-- Insertar usuario administrador por defecto
+INSERT INTO users (username, password_hash, is_active, theme) VALUES 
+('root@anomalia.local', 'admin123_hashed', true, 'theme-enterprise-blue')
+ON CONFLICT (username) 
+DO UPDATE SET password_hash = 'admin123_hashed', is_active = true;
+
+-- Asignar el rol 'admin' al usuario administrador por defecto
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u, roles r 
+WHERE u.username = 'root@anomalia.local' AND r.name = 'admin'
+  AND NOT EXISTS (
+      SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = r.id
+  );
+
+-- =========================================================================
+-- INFRAESTRUCTURA, OIDC Y MONITOREO
+-- =========================================================================
+
+-- Crear tabla general para nodos e infraestructura de componentes (con soporte de service_ip y credenciales de soporte)
+CREATE TABLE IF NOT EXISTS infrastructure_nodes (
+    id SERIAL PRIMARY KEY,
+    hostname VARCHAR(150) NOT NULL,
+    ip_address VARCHAR(50) NOT NULL,      -- IP de acceso al host (ansible_host)
+    service_ip VARCHAR(50),               -- IP de servicio (si no se define en inventario, usa la de host)
+    component_type VARCHAR(50) NOT NULL DEFAULT 'auth',
+    port INTEGER DEFAULT 8427,
+    admin_username VARCHAR(100) DEFAULT 'anomalia', -- Usuario de administración/soporte en el nodo
+    admin_password TEXT,                  -- Contraseña en texto plano del usuario de soporte generada por OpenSSL
+    status VARCHAR(50) DEFAULT 'operational',
+    is_active BOOLEAN DEFAULT TRUE,
+    description TEXT,
+    -- ABM multi-tenant (spec 011): roles que el nodo puede hospedar, pool de
+    -- puertos JSONB para los servicios con puerto dinámico y balanceo por
+    -- menor número de instancias activas (tenants_count_active denormalizado).
+    roles VARCHAR(255),
+    ports_pool JSONB,
+    capacity_slots INTEGER DEFAULT 10,
+    tenants_count_active INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+    CONSTRAINT unique_host_component UNIQUE (hostname, component_type)
+);
+
+-- 8c. Claves foráneas diferidas (spec 011). Los REFERENCES en línea no son
+-- posibles: tenants (bloque 4) se crea antes que users (bloque 5) y las tablas
+-- 8b antes que infrastructure_nodes. Se añaden aquí, de forma idempotente.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_tenants_instance_id') THEN
+        ALTER TABLE tenants ADD CONSTRAINT fk_tenants_instance_id
+            FOREIGN KEY (instance_id) REFERENCES infrastructure_nodes(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_tenants_vmalert_node_id') THEN
+        ALTER TABLE tenants ADD CONSTRAINT fk_tenants_vmalert_node_id
+            FOREIGN KEY (vmalert_node_id) REFERENCES infrastructure_nodes(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_tenants_vmauth_node_id') THEN
+        ALTER TABLE tenants ADD CONSTRAINT fk_tenants_vmauth_node_id
+            FOREIGN KEY (vmauth_node_id) REFERENCES infrastructure_nodes(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_tenants_deletion_confirmed_by') THEN
+        ALTER TABLE tenants ADD CONSTRAINT fk_tenants_deletion_confirmed_by
+            FOREIGN KEY (deletion_confirmed_by) REFERENCES users(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_tvi_instance_id') THEN
+        ALTER TABLE tenant_vmalert_instances ADD CONSTRAINT fk_tvi_instance_id
+            FOREIGN KEY (instance_id) REFERENCES infrastructure_nodes(id) ON DELETE RESTRICT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_portmap_instance_id') THEN
+        ALTER TABLE port_mapping ADD CONSTRAINT fk_portmap_instance_id
+            FOREIGN KEY (instance_id) REFERENCES infrastructure_nodes(id) ON DELETE RESTRICT;
+    END IF;
+END $$;
+
+-- Crear tabla para la configuración dinámica de Proveedores de Identidad (IdP / OIDC)
+CREATE TABLE IF NOT EXISTS oidc_providers (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL,
+    client_id VARCHAR(255) NOT NULL,
+    client_secret TEXT DEFAULT '',
+    issuer_url TEXT NOT NULL,
+    discovery_url TEXT,
+    authorization_endpoint TEXT,
+    token_endpoint TEXT,
+    jwks_uri TEXT,
+    userinfo_endpoint TEXT,
+    end_session_endpoint TEXT,
+    scopes VARCHAR(500) DEFAULT 'openid profile email',
+    use_discovery BOOLEAN DEFAULT TRUE,
+    client_auth_method VARCHAR(50) DEFAULT 'client_secret_basic',
+    pkce_enabled BOOLEAN DEFAULT TRUE,
+    allowed_domains TEXT,
+    default_roles TEXT DEFAULT '',
+    redirect_uri TEXT DEFAULT '',
+    is_active BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Migración idempotente para BD existentes (spec 020).
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS discovery_url TEXT;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS authorization_endpoint TEXT;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS token_endpoint TEXT;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS jwks_uri TEXT;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS userinfo_endpoint TEXT;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS end_session_endpoint TEXT;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS scopes VARCHAR(500) DEFAULT 'openid profile email';
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS use_discovery BOOLEAN DEFAULT TRUE;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS client_auth_method VARCHAR(50) DEFAULT 'client_secret_basic';
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS pkce_enabled BOOLEAN DEFAULT TRUE;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS allowed_domains TEXT;
+ALTER TABLE oidc_providers ADD COLUMN IF NOT EXISTS default_roles TEXT DEFAULT '';
+
+-- Sesiones OIDC de un solo uso (state/nonce/code_verifier) con TTL corto (spec 020).
+CREATE TABLE IF NOT EXISTS oidc_sessions (
+    id VARCHAR(64) PRIMARY KEY,
+    state VARCHAR(64) NOT NULL,
+    nonce VARCHAR(128) NOT NULL,
+    code_verifier VARCHAR(128) NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    client_id VARCHAR(255) NOT NULL,
+    provider_id INTEGER REFERENCES oidc_providers(id) ON DELETE CASCADE,
+    session_type VARCHAR(20) NOT NULL DEFAULT 'web' CHECK (session_type IN ('web','mobile')),
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_oidc_sessions_state ON oidc_sessions(state);
+CREATE INDEX IF NOT EXISTS idx_oidc_sessions_expires ON oidc_sessions(expires_at);
+
+-- Nota: no se siembra ningún proveedor OIDC. Keycloak se retiró del stack por
+-- ser una dependencia exclusiva de pruebas. Los proveedores reales se dan de
+-- alta desde la app móvil (GET/POST /api/v1/oidc/providers) o por consola SQL,
+-- con secretos gestionados fuera del repositorio.
+
+-- Tabla de configuración del proveedor de IA (fila única). Las API keys
+-- (Zen / Gemini) se ingresan desde el panel de control y viven solo aquí,
+-- nunca en archivos del repositorio. Ver specs/003-aiops-alert-pipeline.md §2.
+CREATE TABLE IF NOT EXISTS ai_settings (
+    id SERIAL PRIMARY KEY,
+    selected_provider VARCHAR(100) DEFAULT 'anomalia_ollama',
+    zen_api_key TEXT DEFAULT '',
+    gemini_api_key TEXT DEFAULT '',
+    gemini_model VARCHAR(100) DEFAULT 'gemini-3.5-flash-lite',
+    -- spec 003/018: idioma de la explicación/pasos que redacta la IA.
+    analysis_language VARCHAR(5) DEFAULT 'en',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO ai_settings (selected_provider)
+SELECT 'anomalia_ollama'
+WHERE NOT EXISTS (SELECT 1 FROM ai_settings);
+
+-- Migración idempotente para BD existentes (spec 018).
+ALTER TABLE ai_settings ADD COLUMN IF NOT EXISTS analysis_language VARCHAR(5) DEFAULT 'en';
+
+-- Tabla para almacenar el historial de alertas y análisis de IA (spec 003/018).
+-- El enriquecimiento con IA devuelve una explicación llana (ai_summary), la causa
+-- raíz (ai_root_cause), hasta 3 comprobaciones (ai_checks) y una criticidad
+-- (severity) editable manualmente por el perfil alerts_manager.
+CREATE TABLE IF NOT EXISTS alert_history (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
+    fingerprint VARCHAR(255),
+    alertname VARCHAR(255) NOT NULL,
+    severity VARCHAR(50),
+    summary TEXT,
+    description TEXT,
+    ai_analysis TEXT,
+    status VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Migraciones idempotentes (spec 018).
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(255);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS labels JSONB;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS annotations JSONB;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS generator_url TEXT;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS ai_summary TEXT;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS ai_root_cause TEXT;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS ai_checks JSONB;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS severity_source VARCHAR(10) DEFAULT 'ai';
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS severity_override_by VARCHAR(150);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS severity_override_at TIMESTAMP;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS notified_at TIMESTAMP;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS starts_at TIMESTAMP;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS ends_at TIMESTAMP;
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS ai_error VARCHAR(50);
+-- spec 018: resultado del envío del email de alerta (sent|failed|not_configured|skipped)
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS email_status VARCHAR(16);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS email_error VARCHAR(200);
+ALTER TABLE alert_history ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+-- Dedup/upsert: una UNA fila ACTIVA por (tenant, fingerprint) — índice parcial
+-- sobre status='firing'. Al resolver, la fila pasa a 'resolved' y sale del
+-- índice, de modo que un re-disparo abre un nuevo episodio sin colisionar.
+DROP INDEX IF EXISTS uq_alert_history_fingerprint_status;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_history_active
+    ON alert_history (tenant_id, fingerprint) WHERE status = 'firing';
+CREATE INDEX IF NOT EXISTS idx_alert_history_status_created ON alert_history(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_alert_history_tenant ON alert_history(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_alert_history_ends_at ON alert_history(ends_at);
+
+-- spec 018: estado del proveedor de IA (singleton) para el aviso de cuota/tokens
+-- agotados en IAs cloud (Gemini/Zen). El modelo local (Ollama) no tiene cuota.
+CREATE TABLE IF NOT EXISTS ai_provider_status (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    provider VARCHAR(100) DEFAULT '',
+    state VARCHAR(30) DEFAULT 'ok',
+    kind VARCHAR(30) DEFAULT '',
+    message TEXT DEFAULT '',
+    consecutive_failures INTEGER DEFAULT 0,
+    last_error_at TIMESTAMP,
+    last_success_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO ai_provider_status (id, state) VALUES (1, 'ok') ON CONFLICT (id) DO NOTHING;
+
+-- spec 018: destinatarios de alertas por tenant (X correos), gestionados desde
+-- el panel Alerts (conf) por el perfil alerts_manager.
+CREATE TABLE IF NOT EXISTS tenant_alert_recipients (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    email VARCHAR(255) NOT NULL,
+    label VARCHAR(150) DEFAULT '',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (tenant_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_alert_recipients_tenant ON tenant_alert_recipients(tenant_id);
+
+-- Tabla para registrar los dispositivos móviles (APK / Android)
+CREATE TABLE IF NOT EXISTS user_devices (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    fcm_token TEXT UNIQUE NOT NULL,
+    platform VARCHAR(50) DEFAULT 'android',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE user_devices ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP;
+
+-- Sincronización automática de nodos desde el inventario de Ansible en el primer deploy
+{% set component_groups = [
+    {'group': 'vlogs_storage_nodes', 'type': 'vlstorage', 'port_var': 'vlstorage_port', 'ip_var': 'vlstorage_ip', 'default_port': 8482, 'desc': 'Almacenamiento de VictoriaLogs'},
+    {'group': 'vlogs_insert_nodes', 'type': 'vlinsert', 'port_var': 'vlinsert_port', 'ip_var': 'vlinsert_ip', 'default_port': 8480, 'desc': 'Nodo de inserción para VictoriaLogs'},
+    {'group': 'vlogs_select_nodes', 'type': 'vlselect', 'port_var': 'vlselect_port', 'ip_var': 'vlselect_ip', 'default_port': 8481, 'desc': 'Nodo de consulta para VictoriaLogs'},
+    {'group': 'vm_storage_nodes', 'type': 'vmstorage', 'port_var': 'vmstorage_port', 'ip_var': 'vmstorage_ip', 'default_port': 8402, 'desc': 'Almacenamiento de VictoriaMetrics'},
+    {'group': 'vm_insert_nodes', 'type': 'vminsert', 'port_var': 'vminsert_port', 'ip_var': 'vminsert_ip', 'default_port': 8400, 'desc': 'Nodo de inserción para VictoriaMetrics'},
+    {'group': 'vm_select_nodes', 'type': 'vmselect', 'port_var': 'vmselect_port', 'ip_var': 'vmselect_ip', 'default_port': 8401, 'desc': 'Nodo de consulta para VictoriaMetrics'},
+    {'group': 'vt_storage_nodes', 'type': 'vtstorage', 'port_var': 'vtstorage_port', 'ip_var': 'vtstorage_ip', 'default_port': 8492, 'desc': 'Almacenamiento de VictoriaTraces'},
+    {'group': 'vt_insert_nodes', 'type': 'vtinsert', 'port_var': 'vtinsert_port', 'ip_var': 'vtinsert_ip', 'default_port': 8490, 'desc': 'Nodo de inserción para VictoriaTraces'},
+    {'group': 'vt_select_nodes', 'type': 'vtselect', 'port_var': 'vtselect_port', 'ip_var': 'vtselect_ip', 'default_port': 8491, 'desc': 'Nodo de consulta para VictoriaTraces'},
+    {'group': 'pyroscope_nodes', 'type': 'pyroscope', 'port_var': 'pyroscope_port', 'ip_var': 'pyroscope_ip', 'default_port': 4040, 'desc': 'Servidor de profiling Pyroscope'},
+    {'group': 'vmauth_nodes', 'type': 'vmauth', 'port_var': 'vmauth_port', 'ip_var': 'vmauth_ip', 'default_port': 8427, 'desc': 'Pasarela de autenticación y ruteo multi-tenant'},
+    {'group': 'vmagent_nodes', 'type': 'vmagent', 'port_var': 'vmagent_port', 'ip_var': 'vmagent_ip', 'default_port': 8429, 'desc': 'Agente de recolección de métricas'},
+    {'group': 'alertmanager_nodes', 'type': 'alertmanager', 'port_var': 'alertmanager_port', 'ip_var': 'alertmanager_ip', 'default_port': 9093, 'desc': 'Gestor de alertas Alertmanager'},
+    {'group': 'vmalert_nodes', 'type': 'vmalert', 'port_var': 'vmalert_port', 'ip_var': 'vmalert_ip', 'default_port': 8880, 'desc': 'Evaluador de reglas Vmalert'},
+    {'group': 'backend_nodes', 'type': 'backend', 'port_var': 'backend_port', 'ip_var': 'backend_ip', 'default_port': 8000, 'desc': 'Servicio Backend de la aplicación'},
+    {'group': 'parses_nodes', 'type': 'parses', 'port_var': 'parses_port', 'ip_var': 'parses_ip', 'default_port': 8090, 'desc': 'Servicio Parses de datos'}
+] %}
+
+{% set ns = namespace(rows=[]) %}
+{% for comp in component_groups %}
+  {% if groups[comp.group] is defined and groups[comp.group] | length > 0 %}
+    {% for host in groups[comp.group] %}
+      {# IP de acceso al host (ansible_host) #}
+      {% set host_ip = hostvars[host].ansible_host | default('127.0.0.1') %}
+      
+      {# IP de servicio #}
+      {% set srv_ip = hostvars[host][comp.ip_var] | default(hostvars[host].service_ip) | default(host_ip) %}
+      
+      {% set h_port = hostvars[host][comp.port_var] | default(comp.default_port) %}
+      {% set node_user = hostvars[host].nombre_usuario | default('anomalia') %}
+      {% set node_pass = hostvars[host].clave_texto_plano | default('') %}
+      
+      {% set row_str = "('" ~ host ~ "', '" ~ host_ip ~ "', '" ~ srv_ip ~ "', '" ~ comp.type ~ "', " ~ h_port ~ ", '" ~ node_user ~ "', '" ~ node_pass ~ "', 'operational', '" ~ comp.desc ~ "')" %}
+      {% set ns.rows = ns.rows + [row_str] %}
+    {% endfor %}
+  {% endif %}
+{% endfor %}
+
+{% if ns.rows | length > 0 %}
+INSERT INTO infrastructure_nodes (hostname, ip_address, service_ip, component_type, port, admin_username, admin_password, status, description) VALUES
+{{ ns.rows | join(',\n') }}
+ON CONFLICT (hostname, component_type) DO UPDATE SET 
+    ip_address = EXCLUDED.ip_address,
+    service_ip = EXCLUDED.service_ip,
+    port = EXCLUDED.port,
+    admin_username = EXCLUDED.admin_username,
+    admin_password = EXCLUDED.admin_password,
+    description = EXCLUDED.description,
+    status = 'operational',
+    updated_at = CURRENT_TIMESTAMP;
+{% endif %}

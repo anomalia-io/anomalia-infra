@@ -1,0 +1,164 @@
+---
+- name: Verificar si existe un docker-compose.yml previo en el servidor
+  ansible.builtin.stat:
+    path: "/opt/anomalia/backend/docker-compose.yml"
+  register: compose_file
+
+- name: Bajar el stack de contenedores previo y eliminar volúmenes si es necesario
+  ansible.builtin.command: "{{ anomalia_compose_cmd }} down -v --remove-orphans"
+  args:
+    chdir: "/opt/anomalia/backend"
+  become: yes
+  become_user: "{{ nombre_usuario }}"
+  when: compose_file.stat.exists
+  failed_when: false
+  ignore_errors: true
+
+- name: Crear directorio de despliegue para el backend asignado al usuario anomalia
+  ansible.builtin.file:
+    path: "/opt/anomalia/backend"
+    state: directory
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0755'
+
+- name: Crear subdirectorio local para la base de datos con permisos de anomalia
+  ansible.builtin.file:
+    path: "/opt/anomalia/backend/database"
+    state: directory
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0755'
+
+- name: Verificar si init.sql es un directorio por error previo
+  ansible.builtin.stat:
+    path: "/opt/anomalia/backend/database/init.sql"
+  register: init_sql_stat
+
+- name: Eliminar init.sql si por error es un directorio
+  ansible.builtin.file:
+    path: "/opt/anomalia/backend/database/init.sql"
+    state: absent
+  when: init_sql_stat.stat.isdir is defined and init_sql_stat.stat.isdir
+
+- name: Renderizar plantilla de inicialización de base de datos bajo propiedad de anomalia
+  ansible.builtin.template:
+    src: "init.sql.j2"
+    dest: "/opt/anomalia/backend/database/init.sql"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+
+- name: Copiar código fuente del backend y archivos del frontend asignando propiedad a anomalia
+  ansible.builtin.copy:
+    src: "{{ anomalia_backend_src | default(playbook_dir + '/../anomalia-backend') }}/"
+    dest: "/opt/anomalia/backend/"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    remote_src: no
+
+- name: Copiar plantilla de Docker Compose con integración de Pyroscope
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "/opt/anomalia/backend/docker-compose.yml"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+
+- name: Crear directorio para playbooks adicionales en el nodo con permisos de anomalia
+  ansible.builtin.file:
+    path: "/opt/anomalia/backend/playbooks"
+    state: directory
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0755'
+
+- name: Copiar roles de Ansible al directorio de playbooks
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/roles/"
+    dest: "/opt/anomalia/backend/playbooks/roles/"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    remote_src: no
+
+- name: Copiar playbooks de instalación al servidor bajo el usuario anomalia
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/opt/anomalia/backend/playbooks/"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  loop:
+    - "install-binaries.yml"
+    - "deploy-vmalert.yml"
+    - "sync-vmalert-rules.yml"
+    - "sync-scrapes.yml"
+
+- name: Reconstruir y levantar stack de contenedores con Compose como usuario anomalia
+  ansible.builtin.shell: "{{ anomalia_compose_cmd }} up -d --build"
+  args:
+    chdir: "/opt/anomalia/backend"
+  become: yes
+  become_user: "{{ nombre_usuario }}"
+  environment:
+    PATH: "{{ ansible_env.PATH }}:/usr/local/bin:/usr/bin"
+  register: result
+  until: result.rc == 0
+  retries: 3
+  delay: 10
+
+# --- Aprovisionamiento del modelo de Ollama (spec 003) ----------------
+# El contenedor arranca sin modelos; sin "ollama pull" el backend
+# recibe 404 al invocar la API. Engine-agnóstico: se usa la API HTTP
+# de Ollama publicada en el host (127.0.0.1:11434), no docker/podman.
+# Se usa curl (siempre disponible) en lugar del módulo uri para evitar
+# problemas con become_user y el entorno Python del usuario anomalia.
+- name: Esperar a que el servicio Ollama responda en el host
+  ansible.builtin.shell: |
+    for i in $(seq 1 24); do
+      if curl -sf -m 5 http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+        echo "ready"
+        exit 0
+      fi
+      sleep 5
+    done
+    echo "ollama no respondió tras 120s"
+    exit 1
+  register: ollama_wait
+  changed_when: false
+  until: ollama_wait.rc == 0
+  retries: 3
+  delay: 5
+
+- name: Verificar si el modelo de Ollama ya está presente
+  ansible.builtin.shell: |
+    curl -sf -m 10 http://127.0.0.1:11434/api/tags | python3 -c "import sys,json; print('yes' if '{{ ollama_model }}' in [m.get('name','') for m in json.load(sys.stdin).get('models',[])] else 'no')" 2>/dev/null || echo no
+  register: ollama_model_check
+  changed_when: false
+
+- name: Descargar el modelo de Ollama por defecto si no está presente
+  ansible.builtin.shell: |
+    curl -sf -m 1800 -X POST http://127.0.0.1:11434/api/pull \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"{{ ollama_model }}","stream":false}'
+  when: ollama_model_check.stdout.strip() == 'no'
+  register: ollama_pull
+  changed_when: "'success' in ollama_pull.stdout"
+
+- name: Verificar que el modelo de Ollama quedó disponible
+  ansible.builtin.shell: |
+    for i in $(seq 1 20); do
+      found=$(curl -sf -m 10 http://127.0.0.1:11434/api/tags | python3 -c "import sys,json; print('yes' if '{{ ollama_model }}' in [m.get('name','') for m in json.load(sys.stdin).get('models',[])] else 'no')" 2>/dev/null || echo no)
+      if [ "$found" = "yes" ]; then
+        echo "modelo {{ ollama_model }} disponible"
+        exit 0
+      fi
+      sleep 5
+    done
+    echo "el modelo {{ ollama_model }} no quedó disponible"
+    exit 1
+  register: ollama_verify
+  changed_when: false
+  until: ollama_verify.rc == 0
+  retries: 3
+  delay: 5

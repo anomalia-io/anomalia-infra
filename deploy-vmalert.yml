@@ -1,0 +1,117 @@
+---
+# Playbook liviano para aprovisionar SOLO vmalert (Perf C, spec 016 §2.7).
+#
+# El worker lo usa por defecto para deploy/undeploy/redeploy por-tenant, en lugar
+# de `install-binaries.yml`, que descarga el stack completo (6 releases) aunque
+# `servicio=vmalert`. Aquí:
+#   * se asegura el binario `/usr/local/bin/vmalert` con descarga **short-circuit**
+#     (si ya existe, no se descarga nada);
+#   * se ejecuta el role `vmalert`, que crea/retira las unidades systemd por-tenant.
+#
+# El regen de scrapes y el sync de reglas siguen usando sus playbooks dedicados.
+- name: Aprovisionar solo vmalert (binario + unidades por-tenant)
+  hosts: all
+  become: yes
+  vars:
+    # Compatible con los extra-vars del worker; `gestionar_servicios` y
+    # `nombre_usuario` con los mismos defaults que install-binaries.yml.
+    gestionar_servicios: false
+    nombre_usuario: "anomalia"
+    victoriametrics_version: "latest"
+
+  tasks:
+    - name: Definir directorio temporal unico de esta corrida
+      ansible.builtin.set_fact:
+        tmp_dir: >-
+          {{ (ansible_env.TMPDIR | default('/tmp')) }}/anomalia-vmalert-{{ lookup('password', '/dev/null length=12 chars=hexdigits') }}
+
+    - name: Determinar arquitectura de binarios soportada
+      ansible.builtin.set_fact:
+        anomalia_bin_arch: >-
+          {{ 'amd64' if (ansible_architecture | lower == 'x86_64')
+             else 'arm64' if ('aarch64' in (ansible_architecture | lower))
+             else 'unsupported' }}
+
+    - name: Abortar si la arquitectura no está soportada
+      ansible.builtin.fail:
+        msg: >-
+          Arquitectura '{{ ansible_architecture }}' no soportada. Anomalia
+          publica binarios solo para x86_64 (amd64) y aarch64 (arm64).
+      when: anomalia_bin_arch == 'unsupported'
+
+    - name: Comprobar si el binario vmalert ya esta instalado
+      ansible.builtin.stat:
+        path: /usr/local/bin/vmalert
+      register: vmalert_bin
+
+    # Solo descarga si falta el binario y no estamos en un undeploy. Tras el
+    # primer deploy, las reconciliaciones sucesivas son de segundos.
+    - block:
+        - name: Crear directorio temporal de descarga
+          ansible.builtin.file:
+            path: "{{ tmp_dir }}"
+            state: directory
+            mode: '0755'
+
+        - name: Consultar release de VictoriaMetrics para vmutils
+          ansible.builtin.uri:
+            url: "{{ 'https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/latest' if victoriametrics_version == 'latest' else 'https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/tags/' + victoriametrics_version }}"
+            return_content: yes
+            method: GET
+            status_code: 200
+            body_format: json
+            timeout: 30
+          register: vmutils_release
+          retries: 3
+          delay: 5
+
+        - name: Extraer URL de descarga para vmutils
+          ansible.builtin.set_fact:
+            vmutils_download_url: "{{ item.browser_download_url }}"
+          # La regex se define en vars: interpolar {{ }} dentro de un when:
+          # vuelve el condicional "unsafe" y Ansible aborta la tarea.
+          vars:
+            _pattern: "vmutils-linux-{{ anomalia_bin_arch }}-.*\\.tar\\.gz$"
+          loop: "{{ vmutils_release.json.assets }}"
+          when:
+            - item.name is match(_pattern)
+            - item.name is not search("enterprise")
+
+        - name: Descargar tarball de vmutils
+          ansible.builtin.get_url:
+            url: "{{ vmutils_download_url }}"
+            dest: "{{ tmp_dir }}/vmutils.tar.gz"
+            timeout: 180
+          retries: 3
+          delay: 5
+
+        - name: Extraer binarios de vmutils
+          ansible.builtin.unarchive:
+            src: "{{ tmp_dir }}/vmutils.tar.gz"
+            dest: "{{ tmp_dir }}"
+            remote_src: yes
+
+        - name: Copiar binario vmalert a /usr/local/bin
+          ansible.builtin.copy:
+            src: "{{ tmp_dir }}/vmalert-prod"
+            dest: "/usr/local/bin/vmalert"
+            mode: '0755'
+            remote_src: yes
+      when:
+        - (vmalert_state | default('present')) == 'present'
+        - not vmalert_bin.stat.exists
+
+    - name: Limpiar archivos temporales de descarga
+      ansible.builtin.file:
+        path: "{{ tmp_dir }}"
+        state: absent
+      changed_when: false
+
+    # Unidades por-tenant (o limpieza single). El role es dual-mode e idempotente.
+    - name: Desplegar unidades vmalert por tenant
+      ansible.builtin.include_role:
+        name: vmalert
+      when: >
+        vmalert_instances is defined and vmalert_instances | length > 0 and
+        (inventory_hostname in groups.get('vmalert_nodes', []) or
+         groups.get('all', []) | length == 1)

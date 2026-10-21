@@ -1,0 +1,25 @@
+# Entornos / secretos locales (nunca versionar)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Ansible
+*.retry
+.vault_pass
+*.log
+.inventory/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ansible/
+ansible.cfg.local
+
+# OS / editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

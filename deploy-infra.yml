@@ -1,0 +1,164 @@
+---
+- import_playbook: install-binaries.yml
+
+- name: Desplegar infraestructura completa de Anomalia y Backend Dockerizado
+  hosts: all_nodes
+  become: yes
+  vars:
+    vlstorage_path: "/var/lib/anomalia/victorialogs/data"
+    vmstorage_path: "/var/lib/anomalia/vmstorage/data"
+    vtstorage_path: "/var/lib/anomalia/victoriatraces/data"
+    pyroscope_storage_path: "/var/lib/anomalia/pyroscope/data"
+    alertmanager_storage_path: "/var/lib/anomalia/alertmanager"
+    nombre_usuario: "anomalia"
+    # spec 018: puerto HTTP (en claro) del gateway por el que Alertmanager entrega
+    # el webhook de alertas. El token compartido Bearer se toma del entorno (nunca
+    # del repositorio, constitución §4); un inventario puede sobreescribirlo.
+    backend_http_port: 8000
+    alertmanager_webhook_token: "{{ lookup('env', 'ALERTMANAGER_WEBHOOK_TOKEN') | default('', true) }}"
+
+  pre_tasks:
+    - name: Detectar motor de contenedores y Compose (facts compartidos con el destroy)
+      ansible.builtin.include_tasks: tasks/detect_container_stack.yml
+      tags: always
+
+    - name: 1b. Abortar si no hay motor de contenedores disponible
+      ansible.builtin.fail:
+        msg: >-
+          No se detectó Docker CE ni Podman (rootful) con socket activo.
+          Ámbos son prerequisitos del stack (backend/parses usan Compose).
+      when: engine_detect.stdout | trim == 'missing'
+
+    - name: 2. Abortar si no hay comando de Compose
+      ansible.builtin.fail:
+        msg: >-
+          No se encontró 'docker compose' (plugin v2), 'docker-compose' (v1)
+          ni 'podman-compose'. Instala al menos uno para levantar backend/parses.
+      when: compose_detect.stdout | trim == 'missing'
+
+    - name: 3. Exponer el socket de contenedores al grupo docker
+      block:
+        - name: 3a. Verificar que exista el socket del motor de contenedores
+          ansible.builtin.stat:
+            path: "{{ anomalia_container_socket }}"
+          register: container_sock
+        - name: 3b. Ajustar grupo y permisos del socket (acceso del usuario anomalia)
+          ansible.builtin.file:
+            path: "{{ anomalia_container_socket }}"
+            owner: root
+            group: docker
+            mode: "0660"
+          when: container_sock.stat.exists
+      when: anomalia_container_engine in ['docker', 'podman']
+
+    - name: 4. Crear red de contenedores compartida anomalia_aiops-net si no existe
+      ansible.builtin.command: "{{ anomalia_engine_cmd }} network create --driver bridge anomalia_aiops-net"
+      register: network_create
+      failed_when: network_create.rc != 0 and "already exists" not in network_create.stderr
+      changed_when: "'anomalia_aiops-net' in (network_create.stdout + network_create.stderr)"
+      run_once: true
+
+    - name: 5. Generar clave aleatoria con OpenSSL en el nodo de control
+      ansible.builtin.command: openssl rand -base64 24
+      register: clave_generada
+      delegate_to: localhost
+      run_once: true
+      changed_when: false
+      no_log: true
+
+    - name: 6. Definir contraseña compartida en texto plano para los nodos y registro
+      ansible.builtin.set_fact:
+        clave_texto_plano: "{{ clave_generada.stdout }}"
+      run_once: true
+      no_log: true
+
+    - name: 7. Crear el usuario en los nodos con la contraseña en texto plano para login directo
+      ansible.builtin.user:
+        name: "{{ nombre_usuario }}"
+        password: "{{ clave_texto_plano | password_hash('sha512') }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+      no_log: true
+
+    - name: 8. Otorgar permisos de sudo al usuario
+      ansible.builtin.user:
+        name: "{{ nombre_usuario }}"
+        groups: "{{ 'sudo' if ansible_os_family == 'Debian' else 'wheel' }}"
+        append: yes
+
+    # 8b. Topología flexible (spec 013): solo se añade al grupo 'docker' si el
+    # nodo detecta motor de contenedores y el grupo existe. En nodos que no
+    # ejecutan contenedores (p. ej. storage puro) se omite sin romper el deploy.
+    - name: 8b. Verificar existencia del grupo docker
+      ansible.builtin.getent:
+        database: group
+        key: docker
+      when: anomalia_container_engine in ['docker', 'podman']
+      changed_when: false
+
+    - name: 8c. Otorgar acceso al socket de contenedores si hay motor
+      ansible.builtin.user:
+        name: "{{ nombre_usuario }}"
+        groups: docker
+        append: yes
+      when:
+        - anomalia_container_engine in ['docker', 'podman']
+        - "'docker' in ansible_facts.getent_group"
+  roles:
+    - role: victorialogs
+    - role: victoriametrics
+    - role: victoriatraces
+    - role: pyroscope
+      when: inventory_hostname in groups.get('pyroscope_nodes', [])
+    - role: vmauth
+      when: inventory_hostname in groups.get('vmauth_nodes', [])
+    - role: vmagent
+      when: inventory_hostname in groups.get('vmagent_nodes', [])
+    - role: alertmanager
+      when: inventory_hostname in groups.get('alertmanager_nodes', [])
+    - role: vmalert
+      vars:
+        vmalert_per_tenant: true
+      when: inventory_hostname in groups.get('vmalert_nodes', [])
+    - role: victoria_firewall
+      tags: ['firewall']
+      when: inventory_hostname in groups.get('all_nodes', [])
+    - role: certs
+      tags: ['certs', 'backend']
+      when: inventory_hostname in groups.get('backend_nodes', [])
+    # parses ANTES que backend (spec 008): el gateway provisiona Parses al arrancar,
+    # así que Perses debe estar levantado y listo antes de que arranque el contenedor.
+    - role: parses
+      tags: ['parses']
+      when: inventory_hostname in groups.get('parses_nodes', [])
+    - role: backend
+      tags: ['backend']
+      when: inventory_hostname in groups.get('backend_nodes', [])
+
+  post_tasks:
+    # spec 014 §6.3: la credencial de los nodos rota en cada deploy (task 5 + task
+    # 7), pero init.sql.j2 solo la siembra al crear el volumen. Esta task la
+    # re-sincroniza en cada corrida para que infrastructure_nodes.admin_password
+    # == password del usuario OS 'anomalia'. Asi un import (que no restaura la
+    # credencial, spec 014 §6.2) y un redeploy sin destroy quedan alineados y la
+    # reconciliacion SSH de vmalert/vmagent/vmauth no falla por UNREACHABLE.
+    # Idempotente: si la BD ya tiene el valor vigente, el UPDATE no cambia nada.
+    - name: 9. Re-sincronizar credencial de nodos en infrastructure_nodes
+      ansible.builtin.command:
+        cmd: >-
+          {{ anomalia_engine_cmd }} exec anomalia_postgres psql
+          -U anomal_user -d anomal_db -tAc
+          "UPDATE infrastructure_nodes
+             SET admin_password = '{{ clave_texto_plano }}'
+           WHERE admin_username = 'anomalia';"
+      when:
+        - inventory_hostname in groups.get('backend_nodes', [])
+        - clave_texto_plano is defined
+      register: node_cred_sync
+      changed_when: false
+      no_log: true
+      retries: 15
+      delay: 3
+      until: node_cred_sync.rc == 0
+      tags: ['backend']

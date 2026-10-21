@@ -1,0 +1,8 @@
+# Plantilla por defecto del vmalert por-tenant (spec 011 §4.2/§4.9).
+#
+# Los tenants nuevos arrancan SIN reglas: vmalert exige que el archivo `-rule`
+# exista, pero un grupo vacío es valido y permite que el usuario agregue sus
+# propias reglas desde la UI sin perder el archivo materializado. Las reglas de
+# los tenants internos NO usan esta plantilla: viajan desde la BD
+# (`tenant_vmalert_instances.rules_yaml`, sembradas por `internal_rules`).
+groups: []

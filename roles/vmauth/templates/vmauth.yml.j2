@@ -1,0 +1,136 @@
+unauthorized_user:
+  dump_request_on_errors: true
+  url_map:
+    # 1. Perfilado continuo Pyroscope (Captura gRPC y HTTP sin requerir query args)
+    - src_paths:
+        - "^/push\\.v1\\.PusherService/.*"
+        - "^/pyroscope/.*"
+        - "^/ingest.*"
+        - "^/profiling/.*"
+      headers: ["X-Scope-OrgID: PROFILES"]
+      url_prefix:
+{% if infra_components is defined %}
+{% set pyroscope_up = infra_components | selectattr('component', 'equalto', 'pyroscope') | list %}
+{% if pyroscope_up %}{% for node in pyroscope_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:4040/"
+{% endif %}
+{% else %}
+        {% for host in groups.get('pyroscope_nodes', groups.get('vm_insert_nodes', [])) %}
+        - "http://{{ hostvars[host].pyroscope_ip | default(hostvars[host].ansible_host) | default('172.17.0.1') }}:{{ hostvars[host].pyroscope_port | default('4040') }}/"
+      {% endfor %}
+{% endif %}
+
+    # Métricas - VictoriaMetrics (vminsert)
+    - src_paths: ["/insert/.*"]
+      src_query_args: ["tenant=METRICS"]
+      headers: ["AccountID: 0", "ProjectID: 0"]
+      url_prefix:
+{% if infra_components is defined %}
+{% set vminsert_up = infra_components | selectattr('component', 'equalto', 'vminsert') | list %}
+{% if vminsert_up %}{% for node in vminsert_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:8400/"
+{% endif %}
+{% else %}
+        {% for host in groups.get('vm_insert_nodes', []) %}
+        - "http://{{ hostvars[host].vminsert_ip | default(hostvars[host].ansible_host) | default('127.0.0.1') }}:{{ hostvars[host].vminsert_port | default('8400') }}/"
+        {% endfor %}
+{% endif %}
+
+    # Trazas distribuidas OTLP - VictoriaTraces (vtinsert)
+    - src_paths: ["/insert.*"]
+      src_query_args: ["tenant=TRACES"]
+      headers: ["AccountID: 0", "ProjectID: 1"]
+      url_prefix:
+{% if infra_components is defined %}
+{% set vtinsert_up = infra_components | selectattr('component', 'equalto', 'vtinsert') | list %}
+{% if vtinsert_up %}{% for node in vtinsert_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:8490/"
+{% endif %}
+{% else %}
+        {% for host in groups.get('vt_insert_nodes', groups.get('vm_insert_nodes', [])) %}
+        - "http://{{ hostvars[host].vtinsert_ip | default(hostvars[host].ansible_host) | default('127.0.0.1') }}:{{ hostvars[host].vtinsert_port | default('8490') }}/"
+        {% endfor %}
+{% endif %}
+
+    # Logs de Auditoría - VictoriaLogs (vlinsert)
+    - src_paths: ["/insert.*"]
+      src_query_args: ["tenant=AUDIT_LOGS"]
+      headers: ["AccountID: 0", "ProjectID: 3"]
+      url_prefix:
+{% if infra_components is defined %}
+{% set vlinsert_up = infra_components | selectattr('component', 'equalto', 'vlinsert') | list %}
+{% if vlinsert_up %}{% for node in vlinsert_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:8480/"
+{% endif %}
+{% else %}
+        {% for host in groups.get('vlogs_insert_nodes', groups.get('vm_insert_nodes', [])) %}
+        - "http://{{ hostvars[host].vlinsert_ip | default(hostvars[host].ansible_host) | default('127.0.0.1') }}:{{ hostvars[host].vlinsert_port | default('8480') }}/"
+        {% endfor %}
+{% endif %}
+{# ---------------------------------------------------------------------- #
+   Rutas por-tenant (spec 011 §4.4). Se añaden una debajo de otra: nunca
+   reemplazan los mapeos fijos de arriba, así que una baja solo retira la
+   entrada del tenant y el resto queda intacto.
+   - metrics/logs/traces: match por headers AccountID/ProjectID (numérico) y
+     rewrite a la misma terna hacia el insert del tipo (vminsert/vlinsert/
+     vtinsert).
+   - profiles: match y rewrite por X-Scope-OrgID hacia Pyroscope.
+   El conjunto llega por extra-var `tenants_routing` (BD = fuente de verdad);
+   en modo inventario también se acepta la misma estructura.               #}
+{% if tenants_routing is defined and infra_components is defined %}
+{% for tr in tenants_routing %}
+{% if tr.type == 'profiles' %}
+    # Tenant {{ tr.slug }} (profiles) -> Pyroscope por query arg tenant= + header X-Scope-OrgID
+    - src_query_args: ["tenant={{ tr.slug }}"]
+      headers: ["X-Scope-OrgID: {{ tr.org_id_upper }}"]
+      url_prefix:
+{% set pyroscope_up = infra_components | selectattr('component', 'equalto', 'pyroscope') | list %}
+{% if pyroscope_up %}{% for node in pyroscope_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:4040/"
+{% endif %}
+{% elif tr.type == 'logs' %}
+    # Tenant {{ tr.slug }} (logs) -> VictoriaLogs por query arg tenant= + headers AccountID/ProjectID
+    - src_query_args: ["tenant={{ tr.slug }}"]
+      headers: ["AccountID: {{ tr.account_id }}", "ProjectID: {{ tr.project_id }}"]
+      url_prefix:
+{% set vlinsert_up = infra_components | selectattr('component', 'equalto', 'vlinsert') | list %}
+{% if vlinsert_up %}{% for node in vlinsert_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:8480/"
+{% endif %}
+{% elif tr.type == 'traces' %}
+    # Tenant {{ tr.slug }} (traces) -> VictoriaTraces por query arg tenant= + headers AccountID/ProjectID
+    - src_query_args: ["tenant={{ tr.slug }}"]
+      headers: ["AccountID: {{ tr.account_id }}", "ProjectID: {{ tr.project_id }}"]
+      url_prefix:
+{% set vtinsert_up = infra_components | selectattr('component', 'equalto', 'vtinsert') | list %}
+{% if vtinsert_up %}{% for node in vtinsert_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:8490/"
+{% endif %}
+{% else %}
+    # Tenant {{ tr.slug }} ({{ tr.type | default('metrics') }}) -> VictoriaMetrics por query arg tenant= + headers AccountID/ProjectID
+    - src_query_args: ["tenant={{ tr.slug }}"]
+      headers: ["AccountID: {{ tr.account_id }}", "ProjectID: {{ tr.project_id }}"]
+      url_prefix:
+{% set vminsert_up = infra_components | selectattr('component', 'equalto', 'vminsert') | list %}
+{% if vminsert_up %}{% for node in vminsert_up %}
+        - "http://{{ node.ip }}:{{ node.port }}/"
+{% endfor %}{% else %}
+        - "http://127.0.0.1:8400/"
+{% endif %}
+{% endif %}
+{% endfor %}
+{% endif %}

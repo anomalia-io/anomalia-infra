@@ -1,0 +1,39 @@
+# Receiver de consola + webhook al backend (spec 003 §1.2, spec 018).
+# Alertmanager agrupa y muestra las alertas en su UI y las reenvía al gateway
+# para su enriquecimiento con IA y entrega (email/in-app/push). El webhook usa
+# un token compartido Bearer (AM no puede presentar un JWT de usuario); si el
+# token no está configurado, se omite http_config (instalaciones internas).
+{% set backend_nodes = groups.get('backend_nodes', []) %}
+{% set backend_host = backend_nodes[0] if backend_nodes else '' %}
+{% set backend_addr = (hostvars[backend_host].backend_ip | default(hostvars[backend_host].ansible_host | default('127.0.0.1'))) if backend_host else '127.0.0.1' %}
+{% set backend_port = backend_http_port | default(8000) %}
+{% set webhook_token = alertmanager_webhook_token | default('') %}
+route:
+  group_by:
+    - alertname
+    - tenant_slug
+    - namespace
+    - pod
+    - instance
+    - severity
+    - app
+    - mountpoint
+    - cluster
+    - container
+    - phase
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 3h
+  receiver: 'console'
+
+receivers:
+  - name: 'console'
+    webhook_configs:
+      - url: 'http://{{ backend_addr }}:{{ backend_port }}/api/v1/webhook/alertmanager'
+        send_resolved: true
+{% if webhook_token %}
+        http_config:
+          authorization:
+            type: Bearer
+            credentials: '{{ webhook_token }}'
+{% endif %}
