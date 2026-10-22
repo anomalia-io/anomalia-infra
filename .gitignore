@@ -20,6 +20,9 @@ venv/
 .ansible/
 ansible.cfg.local
 
+# Config local de opencode (contiene rutas absolutas; no versionar)
+opencode.json
+
 # OS / editores
 .DS_Store
 Thumbs.db
