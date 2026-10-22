@@ -1,4 +1,13 @@
-name: Deploy
+# Deploy automatizado para el MANTENEDOR (runner self-hosted).
+#
+# Este workflow está pensado para un runner self-hosted propio (label `self-hosted`)
+# instalado en la máquina destino. Clona `anomalia-backend` por SSH (requiere una
+# clave con acceso a la org) y despliega el stack con Ansible.
+#
+# Si sos un usuario de Anomalia, NO necesitás este workflow: desplegá localmente con
+#   ansible-playbook -i inventory.ini deploy-infra.yml
+# (ver README y docs/ansible-deployment.md).
+name: Deploy (self-hosted)
 on:
   release:
     types: [published]

@@ -5,6 +5,9 @@
 *.pem
 *.key
 
+# Inventario local (cada usuario copia inventory.ini.example)
+inventory.ini
+
 # Ansible
 *.retry
 .vault_pass
