@@ -1,7 +1,9 @@
 [Unit]
 Description=Anomalia VictoriaMetrics Agent
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
+StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=/var/lib/anomalia/vmagent/data

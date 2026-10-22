@@ -30,3 +30,12 @@
     mode: '0644'
   notify:
     - Recargar systemd, habilitar y reiniciar anomalia-alertmanager
+
+# Idempotencia (spec 013): asegurar el arranque aunque la unidad quedara en
+# `inactive/failed` y el template no cambie (mata el bug de handlers).
+- name: Asegurar alertmanager habilitado y arrancado
+  ansible.builtin.systemd:
+    name: anomalia-alertmanager.service
+    state: started
+    enabled: yes
+    daemon_reload: yes

@@ -1,8 +1,9 @@
 [Unit]
 Description=Aplica el aislamiento de red de los puertos de lectura de Victoria (Anomalia)
-After=network.target {{ anomalia_engine_service }}
-Wants=network.target
+After=network-online.target {{ anomalia_engine_service }}
+Wants=network-online.target
 Requires={{ anomalia_engine_service }}
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

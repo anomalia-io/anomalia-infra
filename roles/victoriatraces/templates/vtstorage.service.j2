@@ -1,7 +1,9 @@
 [Unit]
 Description=Anomalia VictoriaTraces Storage Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
+StartLimitIntervalSec=0
 [Service]
 User=root
 ExecStart=/usr/local/bin/vtstorage -storageDataPath={{ vtstorage_path | default('/var/lib/anomalia/victoriatraces/data') }} -httpListenAddr={{ vtstorage_ip | default(ansible_host) | default('127.0.0.1') }}:{{ vtstorage_port | default('8492') }} -retentionPeriod={{ vtstorage_retention_period | default('30d') }}

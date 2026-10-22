@@ -13,3 +13,12 @@
     dest: /etc/systemd/system/anomalia-pyroscope.service
     mode: '0644'
   notify: Recargar systemd y reiniciar pyroscope
+
+# Idempotencia (spec 013): asegurar el arranque aunque la unidad quedara en
+# `inactive/failed` y el template no cambie (mata el bug de handlers).
+- name: Asegurar pyroscope habilitado y arrancado
+  ansible.builtin.systemd:
+    name: anomalia-pyroscope.service
+    state: started
+    enabled: yes
+    daemon_reload: yes

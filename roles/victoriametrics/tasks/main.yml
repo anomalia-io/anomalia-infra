@@ -31,3 +31,29 @@
     mode: '0644'
   notify: Recargar systemd y reiniciar vmselect
   when: inventory_hostname in groups.get('vm_select_nodes', [])
+
+# Idempotencia (spec 013): asegurar el arranque aunque la unidad quedara en
+# `inactive/failed` y el template no cambie (mata el bug de handlers).
+- name: Asegurar vmstorage habilitado y arrancado
+  ansible.builtin.systemd:
+    name: anomalia-vmstorage.service
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: inventory_hostname in groups.get('vm_storage_nodes', [])
+
+- name: Asegurar vminsert habilitado y arrancado
+  ansible.builtin.systemd:
+    name: anomalia-vminsert.service
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: inventory_hostname in groups.get('vm_insert_nodes', [])
+
+- name: Asegurar vmselect habilitado y arrancado
+  ansible.builtin.systemd:
+    name: anomalia-vmselect.service
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: inventory_hostname in groups.get('vm_select_nodes', [])
