@@ -11,7 +11,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: pip
       - name: Install ansible
         run: pip install ansible
       - name: Syntax check (deploy)
@@ -31,4 +30,7 @@ jobs:
           tar xzf gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
           install -m 755 gitleaks /usr/local/bin/gitleaks
       - name: Scan
-        run: gitleaks dir . --no-banner
+        run: |
+          tmp=$(mktemp -d)
+          git archive HEAD | tar -x -C "$tmp"
+          gitleaks dir "$tmp" --no-banner
