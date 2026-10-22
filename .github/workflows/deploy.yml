@@ -5,17 +5,17 @@ on:
   workflow_dispatch:
 jobs:
   deploy:
-    # Runner self-hosted en la máquina destino (192.168.1.27). Requiere:
+    # Runner self-hosted en la máquina destino. Requiere:
     #   - ansible instalado y acceso sudo sin password para el usuario del runner.
-    #   - el repo anomalia-backend clonado dentro del workspace (se hace abajo).
+    #   - clave SSH con acceso a los repos de la org (para clonar anomalia-backend).
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - name: Checkout backend
-        uses: actions/checkout@v4
-        with:
-          repository: anomalia-io/anomalia-backend
-          path: anomalia-backend
+        run: |
+          rm -rf anomalia-backend
+          GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+            git clone --depth 1 git@github.com:anomalia-io/anomalia-backend.git anomalia-backend
       - name: Deploy stack
         run: ansible-playbook -i inventory.ini deploy-infra.yml -e "anomalia_backend_src=${{ github.workspace }}/anomalia-backend"
         env:
