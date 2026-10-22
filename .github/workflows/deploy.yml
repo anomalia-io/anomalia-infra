@@ -7,16 +7,16 @@ jobs:
   deploy:
     # Runner self-hosted en la máquina destino (192.168.1.27). Requiere:
     #   - ansible instalado y acceso sudo sin password para el usuario del runner.
-    #   - el repo anomalia-backend clonado hermanado (se hace abajo).
+    #   - el repo anomalia-backend clonado dentro del workspace (se hace abajo).
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout backend (hermanado)
+      - name: Checkout backend
         uses: actions/checkout@v4
         with:
           repository: anomalia-io/anomalia-backend
-          path: ../anomalia-backend
+          path: anomalia-backend
       - name: Deploy stack
-        run: ansible-playbook -i inventory.ini deploy-infra.yml
+        run: ansible-playbook -i inventory.ini deploy-infra.yml -e "anomalia_backend_src=${{ github.workspace }}/anomalia-backend"
         env:
           ALERTMANAGER_WEBHOOK_TOKEN: ${{ secrets.ALERTMANAGER_WEBHOOK_TOKEN }}
