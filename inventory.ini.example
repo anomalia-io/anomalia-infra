@@ -1,0 +1,97 @@
+# =====================================================================
+# Inventario de ejemplo para Anomalia.
+#
+# Copialo a `inventory.ini` y editalo con TUS servidores:
+#     cp inventory.ini.example inventory.ini
+#
+# El inventario es la ÚNICA fuente de topología (ver README). Un mismo
+# host puede pertenecer a varios grupos. Para una instalación en una
+# sola máquina, dejá `localhost` en todos los grupos (como abajo).
+#
+# Sustituí `HOST` por la IP o nombre DNS de tu nodo. Para nodos remotos,
+# agregá credenciales SSH, por ejemplo:
+#     HOST ansible_host=10.0.0.5 ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_ed25519
+# =====================================================================
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+
+# IP del nodo que corre el backend (gateway). Ajustá a tu valor.
+backend_ip="HOST"
+
+#====================================================================================#
+# NOTA SOBRE IPs DE SERVICIO:                                                        #
+# Por defecto las plantillas usan 'ansible_host' (o '127.0.0.1' como fallback).      #
+# Si necesitás que un servicio escuche en una IP de red distinta a la de conexión    #
+# de Ansible, definí variables por host/grupo, por ejemplo:                          #
+#   - vminsert_ip="10.0.0.50"                                                        #
+#   - vmauth_ip="10.0.0.50"                                                          #
+#   - vmstorage_ip="..."                                                             #
+# ===================================================================================#
+
+
+[all_nodes:children]
+vlogs_storage_nodes
+vlogs_insert_nodes
+vlogs_select_nodes
+vm_storage_nodes
+vm_insert_nodes
+vm_select_nodes
+vt_storage_nodes
+vt_insert_nodes
+vt_select_nodes
+pyroscope_nodes
+vmauth_nodes
+vmagent_nodes
+alertmanager_nodes
+vmalert_nodes
+backend_nodes
+parses_nodes
+
+[vlogs_storage_nodes]
+localhost ansible_connection=local ansible_host=HOST vlstorage_port=8482 vlstorage_ip="HOST"
+
+[vlogs_insert_nodes]
+localhost ansible_connection=local ansible_host=HOST vlinsert_port=8480 vlinsert_ip="HOST"
+
+[vlogs_select_nodes]
+localhost ansible_connection=local ansible_host=HOST vlselect_port=8481 vlselect_ip="HOST"
+
+[vm_storage_nodes]
+localhost ansible_connection=local ansible_host=HOST vmstorage_port=8402 vmstorage_ip="HOST"
+
+[vm_insert_nodes]
+localhost ansible_connection=local ansible_host=HOST vminsert_port=8400 vminsert_ip="HOST"
+
+[vm_select_nodes]
+localhost ansible_connection=local ansible_host=HOST vmselect_port=8401 vmselect_ip="HOST"
+
+[vt_storage_nodes]
+localhost ansible_connection=local ansible_host=HOST vtstorage_port=8492 vtstorage_ip="HOST"
+
+[vt_insert_nodes]
+localhost ansible_connection=local ansible_host=HOST vtinsert_port=8490 vtinsert_ip="HOST"
+
+[vt_select_nodes]
+localhost ansible_connection=local ansible_host=HOST vtselect_port=8491 vtselect_ip="HOST"
+
+[pyroscope_nodes]
+localhost ansible_connection=local ansible_host=HOST pyroscope_port=4040 pyroscope_ip="HOST"
+
+[vmauth_nodes]
+localhost ansible_connection=local ansible_host=HOST vmauth_port=8427 vmauth_ip="HOST"
+
+[vmagent_nodes]
+localhost ansible_connection=local ansible_host=HOST vmagent_port=8429 vmagent_ip="HOST"
+
+[alertmanager_nodes]
+localhost ansible_connection=local ansible_host=HOST alertmanager_port=9093 alertmanager_ip="HOST"
+
+[vmalert_nodes]
+localhost ansible_connection=local ansible_host=HOST vmalert_port=8880 vmalert_ip="HOST"
+
+[backend_nodes]
+localhost ansible_connection=local ansible_host=HOST backend_ip="HOST"
+
+[parses_nodes]
+localhost ansible_connection=local ansible_host=HOST parses_ip="HOST" parses_port=8090

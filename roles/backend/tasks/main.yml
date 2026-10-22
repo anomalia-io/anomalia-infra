@@ -49,9 +49,84 @@
     group: "{{ nombre_usuario }}"
     mode: '0644'
 
+# --- Resolución de la fuente del backend (open source) -----------------
+# Si no existe un checkout hermano, se clona el backend público. Sin
+# anomalia_backend_ref se resuelve la última release publicada (tag vX.Y.Z);
+# si el repo aún no tiene releases, se cae a la rama por defecto (main).
+- name: Comprobar si existe el checkout hermano del backend
+  ansible.builtin.stat:
+    path: "{{ anomalia_backend_src }}"
+  register: anomalia_backend_src_stat
+  when: anomalia_backend_src == (playbook_dir + '/../anomalia-backend')
+  become: no
+
+# Un src distinto del hermano por defecto implica un override explícito:
+# en ese caso siempre se usa tal cual, sin clonar.
+- name: Determinar si se usa un checkout local (hermano existente u override)
+  ansible.builtin.set_fact:
+    anomalia_backend_use_local: >-
+      {{ (anomalia_backend_src != (playbook_dir + '/../anomalia-backend'))
+         or (anomalia_backend_src_stat.stat.exists | default(false)) }}
+
+- name: Resolver el tag de la última release publicada del backend
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/anomalia-io/anomalia-backend/releases/latest"
+    return_content: yes
+    status_code: [200, 404]
+  register: anomalia_backend_latest
+  changed_when: false
+  become: no
+  when:
+    - not (anomalia_backend_use_local | bool)
+    - anomalia_backend_ref == ""
+
+- name: Fijar el ref del backend (última release o fallback a main)
+  ansible.builtin.set_fact:
+    anomalia_backend_resolved_ref: >-
+      {{ (anomalia_backend_latest.json.tag_name | default(''))
+         if (anomalia_backend_latest.status | default(0) == 200 and
+             anomalia_backend_latest.json is defined and
+             anomalia_backend_latest.json.tag_name is defined)
+         else 'main' }}
+  when:
+    - not (anomalia_backend_use_local | bool)
+    - anomalia_backend_ref == ""
+
+- name: Definir el ref efectivo del backend (override explícito o resuelto)
+  ansible.builtin.set_fact:
+    anomalia_backend_effective_ref: "{{ anomalia_backend_ref if anomalia_backend_ref != '' else (anomalia_backend_resolved_ref | default('main')) }}"
+  when: not (anomalia_backend_use_local | bool)
+
+- name: Avisar de la fuente del backend que se usará
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Usando checkout local del backend en ' + anomalia_backend_src
+         if (anomalia_backend_use_local | bool)
+         else 'Clonando backend público ' + anomalia_backend_repo +
+              ' (ref=' + (anomalia_backend_effective_ref | default('main')) + ')' }}
+
+- name: Clonar repositorio público del backend (sin checkout local)
+  ansible.builtin.git:
+    repo: "{{ anomalia_backend_repo }}"
+    dest: "{{ anomalia_backend_clone_dir }}"
+    version: "{{ anomalia_backend_effective_ref | default('main') }}"
+    depth: 1
+    force: yes
+    single_branch: yes
+  register: anomalia_backend_clone
+  until: anomalia_backend_clone is succeeded
+  retries: 3
+  delay: 5
+  become: no
+  when: not (anomalia_backend_use_local | bool)
+
+- name: Fijar el directorio fuente efectivo del backend
+  ansible.builtin.set_fact:
+    anomalia_backend_effective_src: "{{ anomalia_backend_src if (anomalia_backend_use_local | bool) else anomalia_backend_clone_dir }}"
+
 - name: Copiar código fuente del backend y archivos del frontend asignando propiedad a anomalia
   ansible.builtin.copy:
-    src: "{{ anomalia_backend_src | default(playbook_dir + '/../anomalia-backend') }}/"
+    src: "{{ anomalia_backend_effective_src }}/"
     dest: "/opt/anomalia/backend/"
     owner: "{{ nombre_usuario }}"
     group: "{{ nombre_usuario }}"

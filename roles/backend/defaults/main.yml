@@ -2,9 +2,18 @@
 # Configuración de Endpoints para vmauth
 # =====================================================================
 
-# Fuente del backend: el repo anomalia-backend se clona hermanado a este repo
-# (anomalia-infra). Se puede sobreescribir con -e anomalia_backend_src=/ruta.
+# Fuente del backend:
+#   1. Si existe un checkout hermano (../anomalia-backend), se usa ese.
+#   2. Si no, se clona el backend público en su última release publicada.
+# Se puede sobreescribir con -e anomalia_backend_src=/ruta.
 anomalia_backend_src: "{{ playbook_dir }}/../anomalia-backend"
+
+# Repositorio público del backend y ref a clonar cuando no hay checkout local.
+# anomalia_backend_ref vacío => se resuelve la última release publicada (tag vX.Y.Z).
+# Alternativas: "main" o un tag concreto ("v1.0.0").
+anomalia_backend_repo: "https://github.com/anomalia-io/anomalia-backend.git"
+anomalia_backend_ref: ""
+anomalia_backend_clone_dir: "/tmp/anomalia-backend"
 
 # 1. Obtenemos el nodo, puerto e IP específica definida en el inventario para vmauth
 backend_vmauth_node: "{{ groups.get('vmauth_nodes', []) | first | default('') }}"
