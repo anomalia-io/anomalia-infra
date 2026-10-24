@@ -19,8 +19,12 @@ cp inventory.ini.example inventory.ini
 $EDITOR inventory.ini
 
 # 3. Desplegar (requiere sudo en los nodos)
-ansible-playbook -i inventory.ini deploy-infra.yml
+./scripts/deploy.sh
 ```
+
+El script verifica la sintaxis, resuelve el inventario (si falta `inventory.ini`
+intenta copiarlo desde `ANOMALIA_INVENTORY_SRC` o desde el workspace del runner),
+clona el backend por SSH y ejecuta el deploy.
 
 Una instalación en una sola máquina es el caso más simple: en `inventory.ini` dejá `localhost`
 en todos los grupos (ya viene así en el ejemplo).
@@ -50,6 +54,7 @@ en todos los grupos (ya viene así en el ejemplo).
 
 ```
 roles/                 # backend, certs, parses, vmauth, vmalert, victoria_*, victoria_firewall, ...
+scripts/deploy.sh      # deploy local/runner (infra + backend)
 tasks/                 # detect_container_stack.yml
 deploy-infra.yml       # despliegue completo
 destroy-infra.yml      # destrucción limpia
@@ -69,11 +74,14 @@ docs/                  # documentación del repo
 ## Uso
 
 ```bash
-# Verificar sintaxis
-ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check
+# Desplegar (verifica sintaxis, clona el backend y aplica el stack)
+./scripts/deploy.sh
 
-# Desplegar
-ansible-playbook -i inventory.ini deploy-infra.yml
+# Redeploy sin confirmación destructiva
+./scripts/deploy.sh --yes
+
+# Verificar sintaxis manualmente
+ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check
 
 # Destruir
 ansible-playbook -i inventory.ini destroy-infra.yml

@@ -1,11 +1,11 @@
 # Runner self-hosted para deploy automatizado
 
-El workflow `anomalia-infra/.github/workflows/deploy.yml` corre en un runner
-**self-hosted** instalado en la máquina destino (por defecto `192.168.1.27`).
-Al publicarse un release en `anomalia-infra` (o al dispararse manualmente)
-ejecuta `ansible-playbook -i inventory.ini deploy-infra.yml`, clonando
-`anomalia-backend` dentro del workspace vía **SSH** (por eso la clave del
-usuario del runner necesita acceso de lectura a los repos de la org).
+El workflow `anomalia-infra/.github/workflows/deploy-selfhosted.yml` corre en un
+runner **self-hosted** instalado en la máquina destino (por defecto
+`192.168.1.27`). Al publicarse un release en `anomalia-infra` (o al dispararse
+manualmente) ejecuta `scripts/deploy.sh`, que clona `anomalia-backend` dentro
+del workspace vía **SSH** (por eso la clave del usuario del runner necesita
+acceso de lectura a los repos de la org) y aplica `deploy-infra.yml`.
 
 ## Prerrequisitos en la máquina destino
 
@@ -17,6 +17,11 @@ usuario del runner necesita acceso de lectura a los repos de la org).
    ```
 3. **Docker o Podman** operativo (igual que para un deploy manual).
 4. El usuario del runner debe poder clonar los repos privados de la org.
+5. **Inventario persistente**: el workflow usa `actions/checkout` con
+   `clean: false`, así que conserva `inventory.ini` y `.secrets/` (ignorados por
+   git) entre corridas. Dejá el inventario en el workspace del runner o definí el
+   secret `INVENTORY_INI`; si no existe ninguno, `scripts/deploy.sh` falla con
+   instrucciones.
 
 ## Obtener el token de registro
 
@@ -59,6 +64,25 @@ El script:
 No requiere `sudo` para instalar el runner en sí (se instala en
 `~/actions-runner`), pero **sí** para registrar el servicio y para el
 `sudoers` del deploy.
+
+## Inventario y token en el workspace
+
+El deploy preserva dos archivos locales del workspace del runner:
+
+- `inventory.ini`: topología real de los nodos. Opciones:
+  - dejarlo en `~/actions-runner/_work/anomalia-infra/anomalia-infra/inventory.ini`;
+  - definirlo como secret `INVENTORY_INI` (el workflow lo materializa en cada
+    corrida);
+  - `scripts/deploy.sh` también lo copia desde `ANOMALIA_INVENTORY_SRC` o desde
+    otro checkout del workspace si falta.
+- `.secrets/alertmanager_webhook_token`: token compartido AM ↔ Backend. Si no
+  se define `ALERTMANAGER_WEBHOOK_TOKEN`, el playbook lo genera la primera vez y
+  lo reutiliza en corridas posteriores. Para rotarlo, borrá el archivo y
+  redeployá.
+
+Con `clean: false`, el checkout no borra archivos ignorados; si necesitás forzar
+un workspace limpio, eliminá manualmente `inventory.ini` y `.secrets/` (el token
+se regenerará).
 
 ## Verificación
 

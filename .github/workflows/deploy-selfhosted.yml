@@ -1,11 +1,12 @@
 # Deploy automatizado para el MANTENEDOR (runner self-hosted).
 #
 # Este workflow está pensado para un runner self-hosted propio (label `self-hosted`)
-# instalado en la máquina destino. Clona `anomalia-backend` por SSH (requiere una
-# clave con acceso a la org) y despliega el stack con Ansible.
+# instalado en la máquina destino. Usa el mismo script que el deploy local
+# (`scripts/deploy.sh`), que clona `anomalia-backend` por SSH y despliega el
+# stack con Ansible.
 #
 # Si sos un usuario de Anomalia, NO necesitás este workflow: desplegá localmente con
-#   ansible-playbook -i inventory.ini deploy-infra.yml
+#   ./scripts/deploy.sh
 # (ver README y docs/ansible-deployment.md).
 name: Deploy (self-hosted)
 on:
@@ -17,15 +18,23 @@ jobs:
     # Runner self-hosted en la máquina destino. Requiere:
     #   - ansible instalado y acceso sudo sin password para el usuario del runner.
     #   - clave SSH con acceso a los repos de la org (para clonar anomalia-backend).
+    #   - inventory.ini en el workspace del runner (persistido con clean: false)
+    #     o el secret opcional INVENTORY_INI.
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout backend
+        with:
+          # Conserva inventory.ini y .secrets/ (ignorados por git) entre corridas.
+          clean: false
+      - name: Preparar inventory.ini (opcional desde secret)
+        env:
+          INVENTORY_INI: ${{ secrets.INVENTORY_INI }}
         run: |
-          rm -rf anomalia-backend
-          GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
-            git clone --depth 1 git@github.com:anomalia-io/anomalia-backend.git anomalia-backend
+          if [ -n "${INVENTORY_INI:-}" ]; then
+            printf '%s\n' "$INVENTORY_INI" > inventory.ini
+            chmod 600 inventory.ini
+          fi
       - name: Deploy stack
-        run: ansible-playbook -i inventory.ini deploy-infra.yml -e "anomalia_backend_src=${{ github.workspace }}/anomalia-backend"
+        run: ./scripts/deploy.sh --yes
         env:
           ALERTMANAGER_WEBHOOK_TOKEN: ${{ secrets.ALERTMANAGER_WEBHOOK_TOKEN }}

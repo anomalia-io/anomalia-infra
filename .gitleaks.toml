@@ -42,6 +42,7 @@ keywords = ["bearer"]
 description = "Excepciones deliberadas, acotadas por path"
 paths = [
   '''(^|/)gitleaks-baseline\.json$''',
+  '''(^|/)\.secrets/''',
   '''(^|/)node_modules/''',
   '''(^|/)\.venv/''',
   '''(^|/)\.git/''',

@@ -29,7 +29,25 @@ ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check
 
 ### 2. Despliegue Completo de la Plataforma
 ```bash
-cd ansible-infra
+cd anomalia-infra
+./scripts/deploy.sh
+```
+
+El script unifica el flujo local y el del runner: valida prerequisitos, resuelve
+`inventory.ini`, clona el backend por SSH (o usa `--backend-src`), verifica la
+sintaxis y ejecuta el deploy. Opciones útiles:
+
+```bash
+./scripts/deploy.sh --yes                         # sin confirmar redeploy destructivo
+./scripts/deploy.sh --backend-src ../anomalia-backend
+./scripts/deploy.sh --backend-ref v1.2.3
+./scripts/deploy.sh --inventory /ruta/inventory.ini
+./scripts/deploy.sh --help
+```
+
+Equivalente manual:
+```bash
+cd anomalia-infra
 ansible-playbook -i inventory.ini deploy-infra.yml
 ```
 
@@ -77,3 +95,33 @@ backend. No requiere colecciones Ansible. Palancas:
 El `destroy-infra.yml` retira el aislamiento (unidad `anomalia-victoria-firewall`,
 la cadena iptables con su salto en `INPUT` y las rich rules). Detalle en
 `specs/009-platform-support-and-prerequisites.md`.
+
+### 7. Token webhook AM ↔ Backend
+
+El receiver de Alertmanager y el backend comparten un token Bearer para el
+webhook de alertas. `alertmanager_webhook_token` se resuelve en `deploy-infra.yml`
+con esta precedencia:
+
+1. `lookup('env', 'ALERTMANAGER_WEBHOOK_TOKEN')`, si la variable de entorno no
+   está vacía (compatible con el workflow self-hosted, que la inyecta desde un
+   secreto de GitHub).
+2. `lookup('password', '<playbook_dir>/.secrets/alertmanager_webhook_token')`:
+   reutiliza el archivo local si existe o lo genera la primera vez (64
+   caracteres alfanuméricos).
+
+El archivo local vive en `.secrets/`, está ignorado por git y por el allowlist
+de gitleaks (por path), y queda con permisos `0700` en el directorio y `0600` en
+el archivo. La primera `pre_task` de `deploy-infra.yml` crea el directorio en el
+nodo de control para que el lookup no falle en el primer deploy.
+
+- **Rotar el token:** borrar `.secrets/alertmanager_webhook_token` y redeployar.
+  Gateway y Alertmanager reciben el nuevo valor en la misma corrida.
+- **Override:** una var de inventario o `-e alertmanager_webhook_token=...`
+  tiene mayor precedencia.
+- **Desactivar auth explícitamente:** `-e alertmanager_webhook_token=""`. El
+  endpoint y el receiver operan sin autenticación (solo para instalaciones
+  internas de desarrollo).
+
+> En el runner self-hosted, el step de checkout usa `clean: false` para
+> conservar `inventory.ini` y `.secrets/` entre corridas. También se puede
+> definir el secret `INVENTORY_INI` para materializar el inventario.

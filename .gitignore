@@ -5,6 +5,9 @@
 *.pem
 *.key
 
+# Secretos persistidos por el deploy (token webhook AM <-> Backend)
+.secrets/
+
 # Inventario local (cada usuario copia inventory.ini.example)
 inventory.ini
 

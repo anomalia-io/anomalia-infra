@@ -12,12 +12,30 @@
     alertmanager_storage_path: "/var/lib/anomalia/alertmanager"
     nombre_usuario: "anomalia"
     # spec 018: puerto HTTP (en claro) del gateway por el que Alertmanager entrega
-    # el webhook de alertas. El token compartido Bearer se toma del entorno (nunca
-    # del repositorio, constitución §4); un inventario puede sobreescribirlo.
+    # el webhook de alertas. El token compartido Bearer se resuelve por precedencia:
+    #   1. ALERTMANAGER_WEBHOOK_TOKEN del entorno (workflow self-hosted);
+    #   2. archivo local .secrets/alertmanager_webhook_token (ignorado por git),
+    #      reutilizado si existe o generado la primera vez (64 alfanuméricos).
+    # Una var de inventario o -e alertmanager_webhook_token=... lo sobreescribe.
     backend_http_port: 8000
-    alertmanager_webhook_token: "{{ lookup('env', 'ALERTMANAGER_WEBHOOK_TOKEN') | default('', true) }}"
+    alertmanager_webhook_token: >-
+      {{ lookup('env', 'ALERTMANAGER_WEBHOOK_TOKEN')
+         or lookup('ansible.builtin.password',
+                   playbook_dir + '/.secrets/alertmanager_webhook_token',
+                   length=64,
+                   chars=['ascii_letters', 'digits']) }}
 
   pre_tasks:
+    - name: Crear directorio local para secretos persistentes
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/.secrets"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      run_once: true
+      become: false
+      tags: always
+
     - name: Detectar motor de contenedores y Compose (facts compartidos con el destroy)
       ansible.builtin.include_tasks: tasks/detect_container_stack.yml
       tags: always

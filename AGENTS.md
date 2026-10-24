@@ -17,8 +17,10 @@ como código (Ansible) del stack de observabilidad de **Anomalia**.
 ## Comandos
 
 ```bash
+./scripts/deploy.sh                                                 # despliegue (infra + backend)
+./scripts/deploy.sh --yes                                           # redeploy sin confirmación
 ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check   # verificación de sintaxis
-ansible-playbook -i inventory.ini deploy-infra.yml                  # despliegue
+ansible-playbook -i inventory.ini deploy-infra.yml                  # despliegue manual
 ansible-playbook -i inventory.ini destroy-infra.yml                 # destrucción
 gitleaks dir .                                                      # escaneo de secretos (obligatorio)
 ```
@@ -47,8 +49,10 @@ Detalle completo en `specs/013-deployment-topology-and-idempotency.md` (repo `an
 
 ## Convenciones
 
-- **Sin secretos**: nunca versionar credenciales; referenciar por variable de entorno
-  (`lookup('env', ...)`).
+- **Sin secretos**: nunca versionar credenciales. Referenciar por variable de entorno
+  (`lookup('env', ...)`) o por archivos locales ignorados en `.secrets/` (allowlist
+  de gitleaks por path). El deploy del token webhook usa env y cae a
+  `.secrets/alertmanager_webhook_token`.
 - **Commits firmados**: `commit.gpgsign=true` con SSH (heredado del `~/.gitconfig` global).
 - **Un PR por repo**: si un cambio impacta otro repo, abrí una sesión en ese repo.
 
