@@ -117,7 +117,10 @@ resolve_inventory() {
 }
 
 check_inventory_placeholders() {
-  grep -qw 'HOST' "$INVENTORY" && die "El inventario contiene placeholder 'HOST': $INVENTORY"
+  if grep -qw 'HOST' "$INVENTORY"; then
+    die "El inventario todavía contiene el placeholder 'HOST': $INVENTORY
+Editá el archivo con las IPs reales antes de desplegar."
+  fi
 }
 
 preflight() {
