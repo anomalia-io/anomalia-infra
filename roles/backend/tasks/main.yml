@@ -4,13 +4,35 @@
     path: "/opt/anomalia/backend/docker-compose.yml"
   register: compose_file
 
-- name: Bajar el stack de contenedores previo y eliminar volúmenes si es necesario
+- name: Confirmar borrado explícito de volúmenes
+  ansible.builtin.pause:
+    prompt: "Va a eliminar postgres_data y ollama_data. Escriba 'yes' para continuar:"
+  when:
+    - compose_file.stat.exists
+    - anomalia_compose_destroy_volumes | bool
+    - not (anomalia_assume_yes | bool)
+
+- name: Bajar el stack de contenedores previo conservando volúmenes
+  ansible.builtin.command: "{{ anomalia_compose_cmd }} down --remove-orphans"
+  args:
+    chdir: "/opt/anomalia/backend"
+  become: yes
+  become_user: "{{ nombre_usuario }}"
+  when:
+    - compose_file.stat.exists
+    - not (anomalia_compose_destroy_volumes | bool)
+  failed_when: false
+  ignore_errors: true
+
+- name: Bajar el stack previo y eliminar volúmenes (reset-data)
   ansible.builtin.command: "{{ anomalia_compose_cmd }} down -v --remove-orphans"
   args:
     chdir: "/opt/anomalia/backend"
   become: yes
   become_user: "{{ nombre_usuario }}"
-  when: compose_file.stat.exists
+  when:
+    - compose_file.stat.exists
+    - anomalia_compose_destroy_volumes | bool
   failed_when: false
   ignore_errors: true
 
@@ -124,13 +146,97 @@
   ansible.builtin.set_fact:
     anomalia_backend_effective_src: "{{ anomalia_backend_src if (anomalia_backend_use_local | bool) else anomalia_backend_clone_dir }}"
 
-- name: Copiar código fuente del backend y archivos del frontend asignando propiedad a anomalia
+- name: Calcular checksum del código fuente del backend
+  ansible.builtin.shell:
+    cmd: >-
+      tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - .
+      | sha256sum
+      | python3 -c 'import sys; print(sys.stdin.read().split()[0])'
+    chdir: "{{ anomalia_backend_effective_src }}"
+    executable: /bin/bash
+  delegate_to: localhost
+  become: no
+  register: anomalia_backend_source_checksum_result
+  changed_when: false
+
+- name: Definir checksum del código fuente del backend
+  ansible.builtin.set_fact:
+    anomalia_backend_source_checksum: "{{ anomalia_backend_source_checksum_result.stdout | trim }}"
+    anomalia_backend_source_archive: "/tmp/anomalia-backend-{{ anomalia_backend_source_checksum_result.stdout | trim }}.tar.gz"
+
+- name: Comprobar checksum desplegado del backend
+  ansible.builtin.stat:
+    path: "/opt/anomalia/backend/.source_checksum"
+  register: anomalia_backend_checksum_marker
+
+- name: Leer checksum desplegado del backend
+  ansible.builtin.slurp:
+    src: "/opt/anomalia/backend/.source_checksum"
+  when: anomalia_backend_checksum_marker.stat.exists
+  register: anomalia_backend_checksum_marker_content
+
+- name: Definir checksum desplegado del backend
+  ansible.builtin.set_fact:
+    anomalia_backend_deployed_checksum: >-
+      {{ (anomalia_backend_checksum_marker_content.content | b64decode | trim)
+         if anomalia_backend_checksum_marker_content.content is defined
+         else '' }}
+
+- name: Eliminar archivo fuente local previo del backend
+  ansible.builtin.file:
+    path: "{{ anomalia_backend_source_archive }}"
+    state: absent
+  delegate_to: localhost
+  become: no
+
+- name: Comprimir código fuente del backend en el nodo de control
+  ansible.builtin.archive:
+    path: "{{ anomalia_backend_effective_src }}"
+    dest: "{{ anomalia_backend_source_archive }}"
+    format: gz
+    mode: '0644'
+  delegate_to: localhost
+  become: no
+  when: anomalia_backend_source_checksum != anomalia_backend_deployed_checksum
+
+- name: Copiar archivo comprimido del backend al nodo asignado
   ansible.builtin.copy:
-    src: "{{ anomalia_backend_effective_src }}/"
+    src: "{{ anomalia_backend_source_archive }}"
+    dest: "{{ anomalia_backend_source_archive }}"
+    mode: '0644'
+  when: anomalia_backend_source_checksum != anomalia_backend_deployed_checksum
+
+- name: Extraer código fuente del backend y fijar propiedad
+  ansible.builtin.unarchive:
+    src: "{{ anomalia_backend_source_archive }}"
     dest: "/opt/anomalia/backend/"
+    remote_src: yes
+    extra_opts:
+      - --strip-components=1
     owner: "{{ nombre_usuario }}"
     group: "{{ nombre_usuario }}"
-    remote_src: no
+  when: anomalia_backend_source_checksum != anomalia_backend_deployed_checksum
+
+- name: Registrar checksum del código desplegado
+  ansible.builtin.copy:
+    content: "{{ anomalia_backend_source_checksum }}\n"
+    dest: "/opt/anomalia/backend/.source_checksum"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  when: anomalia_backend_source_checksum != anomalia_backend_deployed_checksum
+
+- name: Limpiar archivo comprimido local del backend
+  ansible.builtin.file:
+    path: "{{ anomalia_backend_source_archive }}"
+    state: absent
+  delegate_to: localhost
+  become: no
+
+- name: Limpiar archivo comprimido remoto del backend
+  ansible.builtin.file:
+    path: "{{ anomalia_backend_source_archive }}"
+    state: absent
 
 - name: Copiar plantilla de Docker Compose con integración de Pyroscope
   ansible.builtin.template:
@@ -140,6 +246,44 @@
     group: "{{ nombre_usuario }}"
     mode: '0644'
 
+- name: Copiar la configuración TLS de Nginx
+  ansible.builtin.template:
+    src: nginx-tls.conf.j2
+    dest: "/opt/anomalia/backend/nginx-tls.conf"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+
+- name: Copiar el snippet de proxy de Nginx
+  ansible.builtin.template:
+    src: nginx-proxy.inc.j2
+    dest: "/opt/anomalia/backend/nginx-proxy.inc"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+
+- name: Comprobar el certificado TLS interno
+  ansible.builtin.stat:
+    path: "/opt/anomalia/certs/internal/fullchain.pem"
+  register: certs_internal_fullchain_check
+
+- name: Comprobar el certificado TLS externo
+  ansible.builtin.stat:
+    path: "/opt/anomalia/certs/external/fullchain.pem"
+  register: certs_external_fullchain_check
+  when: certs_external_enabled | default(false) | bool
+
+- name: Verificar que el material TLS requerido exista
+  ansible.builtin.assert:
+    that:
+      - certs_internal_fullchain_check.stat.exists
+      - (not (certs_external_enabled | default(false) | bool)) or
+        (certs_external_fullchain_check is defined and certs_external_fullchain_check.stat.exists)
+    fail_msg: >-
+      Falta material TLS en /opt/anomalia/certs. Ejecutá el role certs antes de
+      levantar el stack o revisá el error de validación del certificado provisto.
+    quiet: true
+
 - name: Crear directorio para playbooks adicionales en el nodo con permisos de anomalia
   ansible.builtin.file:
     path: "/opt/anomalia/backend/playbooks"
@@ -148,13 +292,105 @@
     group: "{{ nombre_usuario }}"
     mode: '0755'
 
-- name: Copiar roles de Ansible al directorio de playbooks
-  ansible.builtin.copy:
-    src: "{{ playbook_dir }}/roles/"
-    dest: "/opt/anomalia/backend/playbooks/roles/"
+- name: Crear directorio de roles de Ansible en el nodo
+  ansible.builtin.file:
+    path: "/opt/anomalia/backend/playbooks/roles"
+    state: directory
     owner: "{{ nombre_usuario }}"
     group: "{{ nombre_usuario }}"
-    remote_src: no
+    mode: '0755'
+
+- name: Calcular checksum de los roles de Ansible
+  ansible.builtin.shell:
+    cmd: >-
+      tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - .
+      | sha256sum
+      | python3 -c 'import sys; print(sys.stdin.read().split()[0])'
+    chdir: "{{ playbook_dir }}/roles"
+    executable: /bin/bash
+  delegate_to: localhost
+  become: no
+  register: anomalia_playbooks_roles_checksum_result
+  changed_when: false
+
+- name: Definir checksum y ruta de los roles de Ansible
+  ansible.builtin.set_fact:
+    anomalia_playbooks_roles_checksum: "{{ anomalia_playbooks_roles_checksum_result.stdout | trim }}"
+    anomalia_playbooks_roles_archive: "/tmp/anomalia-playbooks-roles-{{ anomalia_playbooks_roles_checksum_result.stdout | trim }}.tar.gz"
+
+- name: Comprobar checksum desplegado de los roles de Ansible
+  ansible.builtin.stat:
+    path: "/opt/anomalia/backend/playbooks/.roles_checksum"
+  register: anomalia_playbooks_roles_marker
+
+- name: Leer checksum desplegado de los roles de Ansible
+  ansible.builtin.slurp:
+    src: "/opt/anomalia/backend/playbooks/.roles_checksum"
+  when: anomalia_playbooks_roles_marker.stat.exists
+  register: anomalia_playbooks_roles_marker_content
+
+- name: Definir checksum desplegado de los roles de Ansible
+  ansible.builtin.set_fact:
+    anomalia_playbooks_roles_deployed_checksum: >-
+      {{ (anomalia_playbooks_roles_marker_content.content | b64decode | trim)
+         if anomalia_playbooks_roles_marker_content.content is defined
+         else '' }}
+
+- name: Eliminar archivo local previo de los roles de Ansible
+  ansible.builtin.file:
+    path: "{{ anomalia_playbooks_roles_archive }}"
+    state: absent
+  delegate_to: localhost
+  become: no
+
+- name: Comprimir los roles de Ansible en el nodo de control
+  ansible.builtin.archive:
+    path: "{{ playbook_dir }}/roles"
+    dest: "{{ anomalia_playbooks_roles_archive }}"
+    format: gz
+    mode: '0644'
+  delegate_to: localhost
+  become: no
+  when: anomalia_playbooks_roles_checksum != anomalia_playbooks_roles_deployed_checksum
+
+- name: Copiar archivo comprimido de los roles de Ansible
+  ansible.builtin.copy:
+    src: "{{ anomalia_playbooks_roles_archive }}"
+    dest: "{{ anomalia_playbooks_roles_archive }}"
+    mode: '0644'
+  when: anomalia_playbooks_roles_checksum != anomalia_playbooks_roles_deployed_checksum
+
+- name: Extraer los roles de Ansible y fijar propiedad
+  ansible.builtin.unarchive:
+    src: "{{ anomalia_playbooks_roles_archive }}"
+    dest: "/opt/anomalia/backend/playbooks/roles/"
+    remote_src: yes
+    extra_opts:
+      - --strip-components=1
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+  when: anomalia_playbooks_roles_checksum != anomalia_playbooks_roles_deployed_checksum
+
+- name: Registrar checksum desplegado de los roles de Ansible
+  ansible.builtin.copy:
+    content: "{{ anomalia_playbooks_roles_checksum }}\n"
+    dest: "/opt/anomalia/backend/playbooks/.roles_checksum"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  when: anomalia_playbooks_roles_checksum != anomalia_playbooks_roles_deployed_checksum
+
+- name: Limpiar archivo local de los roles de Ansible
+  ansible.builtin.file:
+    path: "{{ anomalia_playbooks_roles_archive }}"
+    state: absent
+  delegate_to: localhost
+  become: no
+
+- name: Limpiar archivo remoto de los roles de Ansible
+  ansible.builtin.file:
+    path: "{{ anomalia_playbooks_roles_archive }}"
+    state: absent
 
 - name: Copiar playbooks de instalación al servidor bajo el usuario anomalia
   ansible.builtin.copy:

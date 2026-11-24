@@ -255,12 +255,6 @@
       changed_when: false
       when: anomalia_container_engine in ['docker', 'podman']
 
-    - name: Limpiar volúmenes anónimos huérfanos
-      ansible.builtin.command: "{{ anomalia_engine_cmd }} volume prune -f"
-      changed_when: false
-      failed_when: false
-      when: anomalia_container_engine in ['docker', 'podman']
-
     # =====================================================================
     # Datos, configuración y binarios
     # =====================================================================
@@ -279,8 +273,10 @@
       ansible.builtin.debug:
         msg: >-
           /opt/anomalia/certs se conserva intencionalmente. Para regenerar
-          certificados autofirmados, borrar fullchain.pem y privkey.pem de forma
-          explícita. Ver specs/007-https-gateway-and-tenant-access.md
+          certificados autofirmados, borrar external/ e internal/ de forma
+          explícita o ejecutar el próximo deploy con certs_force=true
+          (./scripts/deploy.sh --tls-force). Ver
+          specs/007-https-gateway-and-tenant-access.md
 
     - name: Eliminar binarios instalados en /usr/local/bin
       ansible.builtin.file:

@@ -17,14 +17,22 @@ victoria_firewall_docker_cidr: "172.16.0.0/12"
 
 # IP del host: los servicios systemd locales (vmagent, vmalert) consultan a los
 # select nodes por esta IP, así que el propio host puede conectarse.
-victoria_firewall_host_ip: "{{ ansible_host | default('127.0.0.1') }}"
+victoria_firewall_host_ip: "{{ service_ip | default(ansible_host | default('127.0.0.1')) }}"
 
-# Orígenes permitidos hacia los puertos de lectura: la red de contenedores, el
-# loopback y el propio host. Extender/afinar para disponibilizar públicamente.
-victoria_firewall_allowed_sources:
-  - "{{ victoria_firewall_docker_cidr }}"
-  - "127.0.0.0/8"
-  - "{{ victoria_firewall_host_ip }}"
+# IPs de todos los nodos del inventario. En instalaciones multi-servidor, los
+# componentes se consultan entre sí desde hosts distintos.
+victoria_firewall_peer_ips: >-
+  {{ groups.get('all_nodes', groups.get('all', []))
+     | map('extract', hostvars)
+     | map(attribute='ansible_host', default='127.0.0.1')
+     | unique | list }}
+
+# Orígenes permitidos hacia los puertos de lectura: bridge de contenedores,
+# loopback, IP local y todas las IPs del inventario. to_json/from_json fuerza
+# tipo lista para los loops de firewall.
+victoria_firewall_allowed_sources: >-
+  {{ ([victoria_firewall_docker_cidr, '127.0.0.0/8', victoria_firewall_host_ip]
+      + victoria_firewall_peer_ips) | unique | to_json | from_json }}
 
 # Interruptor general del aislamiento L4 de los puertos de lectura. Poner a
 # `false` en entornos donde el security group / network ACL del cloud ya aísla

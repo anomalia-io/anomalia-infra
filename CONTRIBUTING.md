@@ -59,7 +59,7 @@ Los cambios en playbooks, roles, tasks o variables de inventario deben seguir el
 
 ### ⚠️ Consideraciones Adicionales
 
-- `ANOMALIA_RUN_WORKERS=false` fijo en contenedor TLS (`docker-compose.yml.j2`)
+- Gateway TLS con Nginx (`anomalia_gw_tls`); el único contenedor FastAPI es `anomalia_gw`
 - `WorkerSupervisor` con `pg_try_advisory_lock(0x414E4F53)` - único executor único por BD
 - Heartbeat cada 15s, `_recover_orphans` si heartbeat_at stale
 - `deploy-infra.yml` incluye post-task idempotente que re-sincroniza `admin_password`
@@ -103,4 +103,5 @@ git push origin main
 
 ## 📄 Licencia
 
-[Apache-2.0](./LICENSE)
+- Código: [Apache-2.0](./LICENSE)
+- Documentación: [CC BY-SA 4.0](./LICENSE-DOCS)

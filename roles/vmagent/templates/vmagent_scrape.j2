@@ -84,7 +84,7 @@ scrape_configs:
     static_configs:
       - targets:
         {% for host in groups.get('vmauth_nodes', []) %}
-          - '{{ hostvars[host].vmauth_ip | default(hostvars[host].ansible_host) | default("127.0.0.1") }}:{{ hostvars[host].vmauth_server_port | default("8427") }}'
+          - '{{ hostvars[host].vmauth_ip | default(hostvars[host].ansible_host) | default("127.0.0.1") }}:{{ hostvars[host].vmauth_port | default(hostvars[host].vmauth_server_port | default("8427")) }}'
         {% endfor %}
 {% endif %}
 {% if groups.get('vmagent_nodes', []) | length > 0 %}

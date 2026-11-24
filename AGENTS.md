@@ -18,17 +18,18 @@ como código (Ansible) del stack de observabilidad de **Anomalia**.
 
 ```bash
 ./scripts/deploy.sh                                                 # despliegue (infra + backend)
-./scripts/deploy.sh --yes                                           # redeploy sin confirmación
+./scripts/deploy.sh --reset-data --yes                              # reset explícito sin confirmación
 ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check   # verificación de sintaxis
 ansible-playbook -i inventory.ini deploy-infra.yml                  # despliegue manual
 ansible-playbook -i inventory.ini destroy-infra.yml                 # destrucción
 gitleaks dir .                                                      # escaneo de secretos (obligatorio)
 ```
 
-`inventory.ini` **no se versiona** (ignorado); usá `inventory.ini.example` como plantilla.
+`inventory.ini` **no se versiona** (ignorado). Usá `inventory.ini.local.example` para prueba local o `inventory.ini.multi.example` para implementación real.
 
 ## Invariantes (obligatorios)
 
+- **Todo cambio debe funcionar en local y multi-servidor.** Queda prohibido hardcodear IPs, hostnames o `localhost` para comunicación entre hosts; las referencias cruzadas usan `*_ip` → `ansible_host` → `127.0.0.1` vía `hostvars`.
 - **El inventario es la única fuente de topología.** Quien instala coloca las IPs en los
   grupos (`vlogs_*_nodes`, `vm_*_nodes`, `vt_*_nodes`, `pyroscope_nodes`, `vmauth_nodes`,
   `vmagent_nodes`, `alertmanager_nodes`, `vmalert_nodes`, `backend_nodes`, `parses_nodes`);

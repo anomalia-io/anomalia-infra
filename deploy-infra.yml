@@ -45,14 +45,18 @@
         msg: >-
           No se detectó Docker CE ni Podman (rootful) con socket activo.
           Ámbos son prerequisitos del stack (backend/parses usan Compose).
-      when: engine_detect.stdout | trim == 'missing'
+      when:
+        - engine_detect.stdout | trim == 'missing'
+        - inventory_hostname in groups.get('backend_nodes', []) or inventory_hostname in groups.get('parses_nodes', [])
 
     - name: 2. Abortar si no hay comando de Compose
       ansible.builtin.fail:
         msg: >-
           No se encontró 'docker compose' (plugin v2), 'docker-compose' (v1)
           ni 'podman-compose'. Instala al menos uno para levantar backend/parses.
-      when: compose_detect.stdout | trim == 'missing'
+      when:
+        - compose_detect.stdout | trim == 'missing'
+        - inventory_hostname in groups.get('backend_nodes', []) or inventory_hostname in groups.get('parses_nodes', [])
 
     - name: 3. Exponer el socket de contenedores al grupo docker
       block:
@@ -69,12 +73,21 @@
           when: container_sock.stat.exists
       when: anomalia_container_engine in ['docker', 'podman']
 
-    - name: 4. Crear red de contenedores compartida anomalia_aiops-net si no existe
+    - name: 4a. Verificar red anomalia_aiops-net en este host
+      ansible.builtin.command: "{{ anomalia_engine_cmd }} network inspect anomalia_aiops-net"
+      register: network_inspect
+      changed_when: false
+      failed_when: false
+      when: anomalia_container_engine in ['docker', 'podman']
+
+    - name: 4b. Crear red anomalia_aiops-net solo si falta en este host
       ansible.builtin.command: "{{ anomalia_engine_cmd }} network create --driver bridge anomalia_aiops-net"
       register: network_create
-      failed_when: network_create.rc != 0 and "already exists" not in network_create.stderr
-      changed_when: "'anomalia_aiops-net' in (network_create.stdout + network_create.stderr)"
-      run_once: true
+      changed_when: network_create.rc == 0
+      failed_when: network_create.rc != 0
+      when:
+        - anomalia_container_engine in ['docker', 'podman']
+        - network_inspect.rc != 0
 
     - name: 5. Generar clave aleatoria con OpenSSL en el nodo de control
       ansible.builtin.command: openssl rand -base64 24

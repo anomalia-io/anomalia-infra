@@ -1,0 +1,87 @@
+# =====================================================================
+# Inventario para PRUEBA LOCAL (un solo servidor).
+#
+# Uso:
+#   cp inventory.ini.local.example inventory.ini
+#   ./scripts/deploy.sh
+#
+# Todo corre en la máquina donde se ejecuta Ansible (ansible_connection=local).
+# Para una implementación real en varios servidores usá inventory.ini.multi.example.
+# =====================================================================
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+backend_ip="127.0.0.1"
+backend_port=8000
+victoria_firewall_docker_cidr="172.16.0.0/12"
+
+# TLS autofirmado: CN/SAN principal = IP detectada del host; se cubren además
+# 127.0.0.1, localhost y anomalia.local. Para dominio propio, pasá --hostname.
+# certs_hostname="anomalia.mi-dominio.com"
+# certs_mode="self_signed"
+
+[all_nodes:children]
+vlogs_storage_nodes
+vlogs_insert_nodes
+vlogs_select_nodes
+vm_storage_nodes
+vm_insert_nodes
+vm_select_nodes
+vt_storage_nodes
+vt_insert_nodes
+vt_select_nodes
+pyroscope_nodes
+vmauth_nodes
+vmagent_nodes
+alertmanager_nodes
+vmalert_nodes
+backend_nodes
+parses_nodes
+
+[vlogs_storage_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vlstorage_port=8482 vlstorage_ip="127.0.0.1"
+
+[vlogs_insert_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vlinsert_port=8480 vlinsert_ip="127.0.0.1"
+
+[vlogs_select_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vlselect_port=8481 vlselect_ip="127.0.0.1"
+
+[vm_storage_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vmstorage_port=8402 vmstorage_ip="127.0.0.1"
+
+[vm_insert_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vminsert_port=8400 vminsert_ip="127.0.0.1"
+
+[vm_select_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vmselect_port=8401 vmselect_ip="127.0.0.1"
+
+[vt_storage_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vtstorage_port=8492 vtstorage_ip="127.0.0.1"
+
+[vt_insert_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vtinsert_port=8490 vtinsert_ip="127.0.0.1"
+
+[vt_select_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vtselect_port=8491 vtselect_ip="127.0.0.1"
+
+[pyroscope_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 pyroscope_port=4040 pyroscope_ip="127.0.0.1"
+
+[vmauth_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vmauth_port=8427 vmauth_ip="127.0.0.1"
+
+[vmagent_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vmagent_port=8429 vmagent_ip="127.0.0.1"
+
+[alertmanager_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 alertmanager_port=9093 alertmanager_ip="127.0.0.1"
+
+[vmalert_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 vmalert_port=8880 vmalert_ip="127.0.0.1"
+
+[backend_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 backend_ip="127.0.0.1" backend_port=8000
+
+[parses_nodes]
+localhost ansible_connection=local ansible_host=127.0.0.1 parses_ip="127.0.0.1" parses_port=8090

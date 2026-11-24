@@ -1,0 +1,86 @@
+---
+- name: Renovar certificados TLS y recargar el gateway
+  hosts: backend_nodes
+  become: yes
+  vars:
+    nombre_usuario: "anomalia"
+
+  pre_tasks:
+    - name: Detectar motor de contenedores y Compose
+      ansible.builtin.include_tasks: tasks/detect_container_stack.yml
+      tags: always
+
+  roles:
+    - role: certs
+      tags: ['certs']
+
+  post_tasks:
+    - name: Comprobar que el contenedor Nginx esté en ejecución
+      ansible.builtin.command:
+        argv:
+          - "{{ anomalia_engine_cmd }}"
+          - inspect
+          - "--format"
+          - "{{ '{{' }}.State.Running{{ '}}' }}"
+          - anomalia_gw_tls
+      register: nginx_running
+      changed_when: false
+      failed_when: false
+      become_user: "{{ nombre_usuario }}"
+
+    - name: Abortar si Nginx no está en ejecución
+      ansible.builtin.fail:
+        msg: >-
+          El contenedor anomalia_gw_tls no está en ejecución. --tls-only solo
+          renueva certificados de una instalación existente; usá el deploy
+          completo para la primera instalación.
+      when: nginx_running.rc != 0 or (nginx_running.stdout | trim) != 'true'
+
+    - name: Validar la configuración de Nginx
+      ansible.builtin.command:
+        argv:
+          - "{{ anomalia_engine_cmd }}"
+          - exec
+          - anomalia_gw_tls
+          - nginx
+          - "-t"
+      become_user: "{{ nombre_usuario }}"
+      changed_when: false
+
+    - name: Recargar Nginx con los certificados nuevos
+      ansible.builtin.command:
+        argv:
+          - "{{ anomalia_engine_cmd }}"
+          - exec
+          - anomalia_gw_tls
+          - nginx
+          - "-s"
+          - reload
+      become_user: "{{ nombre_usuario }}"
+
+    # El provisioner de Parses cachea el PEM de la CA interna al arrancar.
+    # Un restart (sin down -v) refresca esa cache sin perder la base.
+    - name: Reiniciar el gateway para refrescar la CA interna cacheada
+      ansible.builtin.command:
+        argv:
+          - "{{ anomalia_engine_cmd }}"
+          - restart
+          - anomalia_gw
+      become_user: "{{ nombre_usuario }}"
+
+    - name: Esperar a que el gateway vuelva a responder
+      ansible.builtin.shell: |
+        for i in $(seq 1 30); do
+          if curl -fsS --max-time 5 http://{{ backend_ip | default(ansible_host | default('127.0.0.1')) }}:{{ backend_port | default(backend_http_port | default(8000)) }}/healthz >/dev/null 2>&1; then
+            echo "ready"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "el gateway no respondió tras 60s"
+        exit 1
+      register: gateway_health
+      changed_when: false
+      until: gateway_health.rc == 0
+      retries: 3
+      delay: 5

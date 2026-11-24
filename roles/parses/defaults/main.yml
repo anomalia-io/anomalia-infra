@@ -8,3 +8,10 @@ parses_image: "persesdev/perses@sha256:b6d075c26e3fbbe20b9e6e63a94fc822ba06cd649
 # Habilita /explore (selector nativo de profile type de Pyroscope, datasources
 # del proyecto y editor de queries). Ver specs/008 §9.
 parses_explorer_enable: true
+
+# Backend (spec 013): DNS del bridge si comparten host; IP:puerto si no.
+backend_node: "{{ groups.get('backend_nodes', []) | first | default('') }}"
+backend_peer_is_local: "{{ not backend_node or backend_node == inventory_hostname }}"
+backend_peer_ip: "{{ '' if not backend_node else (hostvars[backend_node].backend_ip | default(hostvars[backend_node].ansible_host | default('127.0.0.1'))) }}"
+backend_peer_port: "{{ hostvars[backend_node].backend_port | default(hostvars[backend_node].backend_http_port | default(8000)) if backend_node else 8000 }}"
+parses_backend_url: "{{ 'http://anomalia_gw:8000' if (backend_peer_is_local | bool) else ('http://' ~ backend_peer_ip ~ ':' ~ (backend_peer_port | string)) }}"

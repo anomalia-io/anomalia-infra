@@ -1,0 +1,51 @@
+{#- Configuración del terminador TLS del gateway -#}
+{% set tls_enabled = certs_external_enabled | default(false) | bool %}
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+{% if tls_enabled %}
+server {
+    listen 80 default_server;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     /certs/external/fullchain.pem;
+    ssl_certificate_key /certs/external/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    include /etc/nginx/snippets/anomalia-proxy.conf;
+}
+{% else %}
+server {
+    listen 80 default_server;
+    server_name _;
+
+    include /etc/nginx/snippets/anomalia-proxy.conf;
+}
+{% endif %}
+
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name anomalia_gw_tls;
+
+    ssl_certificate     /certs/internal/fullchain.pem;
+    ssl_certificate_key /certs/internal/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    include /etc/nginx/snippets/anomalia-proxy.conf;
+}

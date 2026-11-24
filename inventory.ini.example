@@ -1,12 +1,14 @@
 # =====================================================================
 # Inventario de ejemplo para Anomalia.
 #
-# Copialo a `inventory.ini` y editalo con TUS servidores:
-#     cp inventory.ini.example inventory.ini
+# Este ejemplo es compatible con el flujo histórico de un solo host.
+# Para nuevos despliegues elegí una de estas plantillas:
+#   - inventory.ini.local.example  -> prueba local en una sola máquina (listo para usar)
+#   - inventory.ini.multi.example  -> implementación real en varios servidores
+# Copiá la que corresponda a `inventory.ini` y editá las IPs cuando haga falta.
 #
 # El inventario es la ÚNICA fuente de topología (ver README). Un mismo
-# host puede pertenecer a varios grupos. Para una instalación en una
-# sola máquina, dejá `localhost` en todos los grupos (como abajo).
+# host puede pertenecer a varios grupos.
 #
 # Sustituí `HOST` por la IP o nombre DNS de tu nodo. Para nodos remotos,
 # agregá credenciales SSH, por ejemplo:
@@ -18,6 +20,15 @@ ansible_python_interpreter=/usr/bin/python3
 
 # IP del nodo que corre el backend (gateway). Ajustá a tu valor.
 backend_ip="HOST"
+
+# TLS del gateway (opcional; los defaults alcanzan para autofirmado):
+#   self_signed -> Ansible genera CA + leaf (default)
+#   provided    -> usá certs_external_cert/key o .secrets/certs/{fullchain,privkey}.pem
+#   disabled    -> Nginx publica solo HTTP :80 (TLS interno de Parses sigue activo)
+# certs_mode="self_signed"
+# certs_hostname="anomalia.mi-dominio.com"  # opcional; default = IP detectada
+# certs_external_cert="/ruta/abs/fullchain.pem"
+# certs_external_key="/ruta/abs/privkey.pem"
 
 #====================================================================================#
 # NOTA SOBRE IPs DE SERVICIO:                                                        #

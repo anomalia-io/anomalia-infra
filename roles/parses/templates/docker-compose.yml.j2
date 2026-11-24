@@ -12,7 +12,7 @@ services:
       - "{{ parses_port }}:{{ parses_container_port }}"
     environment:
       - PERSES_WEB_LISTEN_ADDRESS=:{{ parses_container_port }}
-      - BACKEND_URL=http://anomalia_gw:8000
+      - BACKEND_URL={{ parses_backend_url }}
     volumes:
       - ./config.yaml:/etc/perses/config.yaml:ro
     networks:

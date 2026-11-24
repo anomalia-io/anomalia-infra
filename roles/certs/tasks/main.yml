@@ -1,37 +1,66 @@
 ---
 # =====================================================================
 # Role: certs
-# Materializa la PKI del gateway en /opt/anomalia/certs
+# Materializa la PKI del gateway en /opt/anomalia/certs.
 #
 # Salida:
-#   ca.key + ca.crt    -> CA privada autofirmada (ancla de confianza)
-#   privkey.pem        -> clave privada del leaf
-#   leaf.crt           -> certificado del leaf (CN = certs_hostname)
-#   fullchain.pem      -> leaf + ca.crt, es lo que sirve uvicorn
+#   external/fullchain.pem + external/privkey.pem -> certificado público
+#   external/ca.crt                                 -> CA (solo self_signed)
+#   internal/fullchain.pem + internal/privkey.pem -> TLS interno de Parses
+#   internal/ca.crt                                 -> ancla de confianza interna
 #
-# La CA separada permite que Parses valide el proxy TLS del gateway sin
-# depender de un leaf CA:FALSE usado como ancla (spec 008 §3.2).
-#
-# Idempotente: no regenera nada si el material ya existe, salvo que se pase
-# certs_force=true (necesario al cambiar el SAN o la clave).
+# El certificado externo puede ser generado por Ansible (self_signed) o
+# provisto por el operador (provided). El interno se genera siempre y es el
+# que valida Parses contra el proxy de datasources (spec 008 §3.2).
 # =====================================================================
 
-- name: Construir lista de nombres DNS cubiertos por el SAN
+- name: Validar el modo de certificado externo
+  ansible.builtin.assert:
+    that:
+      - certs_mode in ['self_signed', 'provided', 'disabled']
+    fail_msg: "certs_mode debe ser self_signed, provided o disabled (actual: {{ certs_mode }})"
+    quiet: true
+
+- name: Construir el SAN externo autofirmado
   ansible.builtin.set_fact:
     certs_san_dns: "{{ ([certs_hostname] + certs_extra_dns) | unique }}"
+    certs_san_ips: >-
+      {{ (certs_ips
+          + [ansible_default_ipv4.address | default('')]
+          + ([certs_hostname]
+             if (certs_hostname is search('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+                 or ':' in certs_hostname)
+             else []))
+         | unique | reject('equalto', '') | list }}
+  when: certs_mode == 'self_signed'
 
-- name: Construir lista de IPs cubiertas por el SAN incluyendo la IP del nodo
+- name: Construir el SAN interno
   ansible.builtin.set_fact:
-    certs_san_ips: "{{ (certs_ips + [ansible_default_ipv4.address | default('')]) | unique | reject('equalto', '') | list }}"
+    certs_internal_san_dns: "{{ ([certs_internal_hostname] + certs_internal_extra_dns) | unique }}"
+    certs_internal_san_ips: "{{ certs_internal_ips | unique }}"
 
-- name: Construir el distinguished name de la CA privada
+- name: Construir los distinguished names de las CAs
   ansible.builtin.set_fact:
     certs_ca_dn: >-
       /C={{ certs_country }}/ST={{ certs_state }}/L={{ certs_locality }}/O={{ certs_org }}/OU={{ certs_ou }}/CN={{ certs_ca_cn }}
+    certs_internal_ca_dn: >-
+      /C={{ certs_country }}/ST={{ certs_state }}/L={{ certs_locality }}/O={{ certs_org }}/OU={{ certs_ou }}/CN={{ certs_internal_ca_cn }}
 
-- name: Eliminar el material criptografico previo cuando se fuerza la regeneracion
+- name: Crear directorios de certificados
   ansible.builtin.file:
-    path: "{{ certs_dir }}/{{ item }}"
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0755'
+  loop:
+    - "{{ certs_dir }}"
+    - "{{ certs_external_dir }}"
+    - "{{ certs_internal_dir }}"
+
+- name: Eliminar el material externo generado cuando se fuerza la regeneración
+  ansible.builtin.file:
+    path: "{{ certs_external_dir }}/{{ item }}"
     state: absent
   loop:
     - ca.key
@@ -41,25 +70,124 @@
     - leaf.csr
     - leaf.crt
     - fullchain.pem
+    - openssl.cnf
+    - "{{ certs_external_managed_marker | basename }}"
+  when:
+    - certs_force | bool
+    - certs_mode == 'self_signed'
+
+- name: Eliminar el material interno cuando se fuerza la regeneración
+  ansible.builtin.file:
+    path: "{{ certs_internal_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - ca.key
+    - ca.crt
+    - ca.srl
+    - privkey.pem
+    - leaf.csr
+    - leaf.crt
+    - fullchain.pem
+    - openssl.cnf
   when: certs_force | bool
 
-- name: Crear directorio de certificados TLS
-  ansible.builtin.file:
-    path: "{{ certs_dir }}"
-    state: directory
+# Migración desde el layout histórico (archivos directamente en certs_dir).
+# Se hace solo si todavía no existe external/fullchain.pem y no se pidió
+# regenerar, para conservar la confianza ya establecida en los clientes.
+- name: Comprobar el material TLS legacy en la raíz de certs
+  ansible.builtin.stat:
+    path: "{{ certs_dir }}/{{ item }}"
+  loop:
+    - ca.key
+    - ca.crt
+    - privkey.pem
+    - leaf.csr
+    - leaf.crt
+    - fullchain.pem
+  register: certs_legacy_stats
+  when:
+    - certs_mode == 'self_signed'
+    - not (certs_force | bool)
+
+- name: Comprobar si ya existe el material externo nuevo
+  ansible.builtin.stat:
+    path: "{{ certs_external_dir }}/fullchain.pem"
+  register: certs_external_fullchain_stat
+  when:
+    - certs_mode == 'self_signed'
+    - not (certs_force | bool)
+
+- name: Migrar el material TLS legacy a external/
+  ansible.builtin.copy:
+    src: "{{ certs_dir }}/{{ item.item }}"
+    dest: "{{ certs_external_dir }}/{{ item.item }}"
+    remote_src: true
     owner: "{{ nombre_usuario }}"
     group: "{{ nombre_usuario }}"
-    mode: '0755'
+    mode: "{{ '0600' if item.item in ['ca.key', 'privkey.pem'] else '0644' }}"
+  loop: "{{ certs_legacy_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - certs_mode == 'self_signed'
+    - not (certs_force | bool)
+    - not (certs_external_fullchain_stat is defined and certs_external_fullchain_stat.stat.exists)
+    - item.stat.exists
 
-- name: Renderizar configuracion OpenSSL con los SAN declarados
+# Si hay un fullchain externo pero no el marcador de Ansible, se asume que el
+# operador colocó un certificado provisto: se conserva tal cual para no
+# reemplazarlo silenciosamente al ejecutar un deploy sin --tls-mode.
+- name: Comprobar el fullchain externo final
+  ansible.builtin.stat:
+    path: "{{ certs_external_dir }}/fullchain.pem"
+  register: certs_external_fullchain_final
+  when: certs_mode == 'self_signed'
+
+- name: Comprobar la clave externa final
+  ansible.builtin.stat:
+    path: "{{ certs_external_dir }}/privkey.pem"
+  register: certs_external_privkey_final
+  when: certs_mode == 'self_signed'
+
+- name: Comprobar el marcador de certificado externo gestionado
+  ansible.builtin.stat:
+    path: "{{ certs_external_managed_marker }}"
+  register: certs_external_marker_final
+  when: certs_mode == 'self_signed'
+
+- name: Decidir si Ansible gestiona el certificado externo autofirmado
+  ansible.builtin.set_fact:
+    certs_external_managed: >-
+      {{ (certs_force | bool) or
+         (not (certs_external_fullchain_final.stat.exists | default(false))) or
+         (certs_external_marker_final.stat.exists | default(false)) }}
+  when: certs_mode == 'self_signed'
+
+- name: Inicializar la gestión externa para los otros modos
+  ansible.builtin.set_fact:
+    certs_external_managed: false
+  when: certs_mode != 'self_signed'
+
+- name: Avisar que se conserva un certificado externo no gestionado
+  ansible.builtin.debug:
+    msg: >-
+      Se detectó {{ certs_external_dir }}/fullchain.pem sin el marcador de
+      Ansible; se conserva como certificado provisto. Usá certs_force=true si
+      querés regenerar un autofirmado.
+  when:
+    - certs_mode == 'self_signed'
+    - not (certs_external_managed | bool)
+
+# --- TLS interno (siempre generado) -----------------------------------
+- name: Renderizar la configuración OpenSSL interna
   ansible.builtin.template:
-    src: openssl.cnf.j2
-    dest: "{{ certs_dir }}/openssl.cnf"
+    src: openssl-internal.cnf.j2
+    dest: "{{ certs_internal_dir }}/openssl.cnf"
     owner: "{{ nombre_usuario }}"
     group: "{{ nombre_usuario }}"
     mode: '0644'
 
-- name: Generar la CA privada autofirmada si no existe
+- name: Generar la CA interna si no existe
   ansible.builtin.command:
     argv:
       - openssl
@@ -72,19 +200,19 @@
       - -days
       - "{{ certs_days }}"
       - -keyout
-      - "{{ certs_dir }}/ca.key"
+      - "{{ certs_internal_dir }}/ca.key"
       - -out
-      - "{{ certs_dir }}/ca.crt"
+      - "{{ certs_internal_dir }}/ca.crt"
       - -subj
-      - "{{ certs_ca_dn }}"
+      - "{{ certs_internal_ca_dn }}"
       - -addext
       - "basicConstraints=critical,CA:TRUE"
       - -addext
       - "keyUsage=critical,keyCertSign,cRLSign"
   args:
-    creates: "{{ certs_dir }}/ca.crt"
+    creates: "{{ certs_internal_dir }}/ca.crt"
 
-- name: Generar la clave privada del leaf si no existe
+- name: Generar la clave privada interna si no existe
   ansible.builtin.command:
     argv:
       - openssl
@@ -94,97 +222,364 @@
       - "rsa:{{ certs_key_size }}"
       - -sha256
       - -keyout
-      - "{{ certs_dir }}/privkey.pem"
+      - "{{ certs_internal_dir }}/privkey.pem"
       - -out
-      - "{{ certs_dir }}/leaf.csr"
+      - "{{ certs_internal_dir }}/leaf.csr"
       - -config
-      - "{{ certs_dir }}/openssl.cnf"
+      - "{{ certs_internal_dir }}/openssl.cnf"
   args:
-    creates: "{{ certs_dir }}/privkey.pem"
+    creates: "{{ certs_internal_dir }}/privkey.pem"
 
-# El CSR se genera aparte: al migrar de un certificado autofirmado previo, la
-# clave ya existe pero el CSR no, y sin esta tarea la firma fallaria por falta de
-# leaf.csr.
-- name: Generar el CSR del leaf si no existe
+- name: Generar el CSR interno si no existe
   ansible.builtin.command:
     argv:
       - openssl
       - req
       - -new
       - -key
-      - "{{ certs_dir }}/privkey.pem"
+      - "{{ certs_internal_dir }}/privkey.pem"
       - -out
-      - "{{ certs_dir }}/leaf.csr"
+      - "{{ certs_internal_dir }}/leaf.csr"
       - -config
-      - "{{ certs_dir }}/openssl.cnf"
+      - "{{ certs_internal_dir }}/openssl.cnf"
   args:
-    creates: "{{ certs_dir }}/leaf.csr"
+    creates: "{{ certs_internal_dir }}/leaf.csr"
 
-- name: Firmar el leaf con la CA privada si no existe
+- name: Firmar el leaf interno con la CA interna si no existe
   ansible.builtin.command:
     argv:
       - openssl
       - x509
       - -req
       - -in
-      - "{{ certs_dir }}/leaf.csr"
+      - "{{ certs_internal_dir }}/leaf.csr"
       - -CA
-      - "{{ certs_dir }}/ca.crt"
+      - "{{ certs_internal_dir }}/ca.crt"
       - -CAkey
-      - "{{ certs_dir }}/ca.key"
+      - "{{ certs_internal_dir }}/ca.key"
       - -CAserial
-      - "{{ certs_dir }}/ca.srl"
+      - "{{ certs_internal_dir }}/ca.srl"
       - -CAcreateserial
       - -days
       - "{{ certs_days }}"
       - -sha256
       - -extfile
-      - "{{ certs_dir }}/openssl.cnf"
+      - "{{ certs_internal_dir }}/openssl.cnf"
       - -extensions
       - v3_req
       - -out
-      - "{{ certs_dir }}/leaf.crt"
+      - "{{ certs_internal_dir }}/leaf.crt"
   args:
-    creates: "{{ certs_dir }}/leaf.crt"
+    creates: "{{ certs_internal_dir }}/leaf.crt"
 
-# El orden de la cadena importa: primero el leaf que presenta el servidor y
-# despues la CA que lo firma. Se ensambla por contenido para que sea idempotente
-# y se regenere solo si cambian leaf.crt o ca.crt.
-- name: Ensamblar la cadena fullchain (leaf + CA)
+- name: Ensamblar la cadena fullchain interna
   ansible.builtin.copy:
-    dest: "{{ certs_dir }}/fullchain.pem"
-    # El escalar de bloque garantiza el salto de linea entre ambos PEM: lookup()
-    # puede devolver el contenido sin el newline final y concatenarlos sin
-    # separador produce un PEM invalido.
+    dest: "{{ certs_internal_dir }}/fullchain.pem"
     content: |
-      {{ lookup('ansible.builtin.file', certs_dir ~ '/leaf.crt') }}
-      {{ lookup('ansible.builtin.file', certs_dir ~ '/ca.crt') }}
+      {{ lookup('ansible.builtin.file', certs_internal_dir ~ '/leaf.crt') }}
+      {{ lookup('ansible.builtin.file', certs_internal_dir ~ '/ca.crt') }}
     owner: "{{ nombre_usuario }}"
     group: "{{ nombre_usuario }}"
     mode: '0644'
 
-- name: Ajustar permisos de la clave privada del leaf
-  ansible.builtin.file:
-    path: "{{ certs_dir }}/privkey.pem"
-    owner: "{{ nombre_usuario }}"
-    group: "{{ nombre_usuario }}"
-    mode: '0600'
-
-- name: Ajustar permisos de la clave privada de la CA
-  ansible.builtin.file:
-    path: "{{ certs_dir }}/ca.key"
-    owner: "{{ nombre_usuario }}"
-    group: "{{ nombre_usuario }}"
-    mode: '0600'
-
-- name: Ajustar permisos del certificado de la CA
-  ansible.builtin.file:
-    path: "{{ certs_dir }}/ca.crt"
+# --- TLS externo autofirmado ------------------------------------------
+- name: Renderizar la configuración OpenSSL externa
+  ansible.builtin.template:
+    src: openssl.cnf.j2
+    dest: "{{ certs_external_dir }}/openssl.cnf"
     owner: "{{ nombre_usuario }}"
     group: "{{ nombre_usuario }}"
     mode: '0644'
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
 
-- name: Registrar disponibilidad del certificado para los roles posteriores
-  ansible.builtin.stat:
-    path: "{{ certs_dir }}/fullchain.pem"
-  register: certs_stat
+- name: Generar la CA externa autofirmada si no existe
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -nodes
+      - -newkey
+      - "rsa:{{ certs_key_size }}"
+      - -sha256
+      - -days
+      - "{{ certs_days }}"
+      - -keyout
+      - "{{ certs_external_dir }}/ca.key"
+      - -out
+      - "{{ certs_external_dir }}/ca.crt"
+      - -subj
+      - "{{ certs_ca_dn }}"
+      - -addext
+      - "basicConstraints=critical,CA:TRUE"
+      - -addext
+      - "keyUsage=critical,keyCertSign,cRLSign"
+  args:
+    creates: "{{ certs_external_dir }}/ca.crt"
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+- name: Generar la clave privada externa si no existe
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -nodes
+      - -newkey
+      - "rsa:{{ certs_key_size }}"
+      - -sha256
+      - -keyout
+      - "{{ certs_external_dir }}/privkey.pem"
+      - -out
+      - "{{ certs_external_dir }}/leaf.csr"
+      - -config
+      - "{{ certs_external_dir }}/openssl.cnf"
+  args:
+    creates: "{{ certs_external_dir }}/privkey.pem"
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+- name: Generar el CSR externo si no existe
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -new
+      - -key
+      - "{{ certs_external_dir }}/privkey.pem"
+      - -out
+      - "{{ certs_external_dir }}/leaf.csr"
+      - -config
+      - "{{ certs_external_dir }}/openssl.cnf"
+  args:
+    creates: "{{ certs_external_dir }}/leaf.csr"
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+- name: Firmar el leaf externo con la CA externa si no existe
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -req
+      - -in
+      - "{{ certs_external_dir }}/leaf.csr"
+      - -CA
+      - "{{ certs_external_dir }}/ca.crt"
+      - -CAkey
+      - "{{ certs_external_dir }}/ca.key"
+      - -CAserial
+      - "{{ certs_external_dir }}/ca.srl"
+      - -CAcreateserial
+      - -days
+      - "{{ certs_days }}"
+      - -sha256
+      - -extfile
+      - "{{ certs_external_dir }}/openssl.cnf"
+      - -extensions
+      - v3_req
+      - -out
+      - "{{ certs_external_dir }}/leaf.crt"
+  args:
+    creates: "{{ certs_external_dir }}/leaf.crt"
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+- name: Ensamblar la cadena fullchain externa autofirmada
+  ansible.builtin.copy:
+    dest: "{{ certs_external_dir }}/fullchain.pem"
+    content: |
+      {{ lookup('ansible.builtin.file', certs_external_dir ~ '/leaf.crt') }}
+      {{ lookup('ansible.builtin.file', certs_external_dir ~ '/ca.crt') }}
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+- name: Marcar el certificado externo como gestionado por Ansible
+  ansible.builtin.copy:
+    dest: "{{ certs_external_managed_marker }}"
+    content: "self_signed\n"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+# --- TLS externo provisto ---------------------------------------------
+- name: Validar que se hayan indicado certificado y clave provistos
+  ansible.builtin.assert:
+    that:
+      - certs_external_cert | length > 0
+      - certs_external_key | length > 0
+    fail_msg: "certs_mode=provided requiere certs_external_cert y certs_external_key"
+    quiet: true
+  when: certs_mode == 'provided'
+
+- name: Eliminar artefactos autofirmados previos al usar un certificado provisto
+  ansible.builtin.file:
+    path: "{{ certs_external_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - ca.key
+    - ca.crt
+    - ca.srl
+    - leaf.crt
+    - leaf.csr
+    - openssl.cnf
+    - "{{ certs_external_managed_marker | basename }}"
+  when: certs_mode == 'provided'
+
+- name: Copiar el certificado externo provisto
+  ansible.builtin.copy:
+    src: "{{ certs_external_cert }}"
+    dest: "{{ certs_external_dir }}/fullchain.pem"
+    remote_src: "{{ certs_external_cert_remote_src | bool }}"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  when: certs_mode == 'provided'
+
+- name: Copiar la clave externa provista
+  ansible.builtin.copy:
+    src: "{{ certs_external_key }}"
+    dest: "{{ certs_external_dir }}/privkey.pem"
+    remote_src: "{{ certs_external_cert_remote_src | bool }}"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0600'
+  when: certs_mode == 'provided'
+
+- name: Validar el certificado externo provisto
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cert={{ (certs_external_dir ~ '/fullchain.pem') | quote }}
+    key={{ (certs_external_dir ~ '/privkey.pem') | quote }}
+    host={{ certs_hostname | quote }}
+    [ -s "$cert" ] && [ -s "$key" ] || { echo "archivo_ausente"; exit 1; }
+    openssl x509 -in "$cert" -noout >/dev/null 2>&1 || { echo "cert_invalido"; exit 1; }
+    openssl pkey -in "$key" -noout -passin pass: >/dev/null 2>&1 || { echo "clave_invalida_o_cifrada"; exit 1; }
+    cert_pub=$(openssl x509 -in "$cert" -noout -pubkey | openssl pkey -pubin -outform der | openssl dgst -sha256 | awk '{print $NF}')
+    key_pub=$(openssl pkey -in "$key" -passin pass: -pubout -outform der | openssl dgst -sha256 | awk '{print $NF}')
+    [ "$cert_pub" = "$key_pub" ] || { echo "clave_no_coincide"; exit 1; }
+    openssl x509 -in "$cert" -noout -checkend 0 >/dev/null || { echo "cert_vencido"; exit 1; }
+    host_check=$(openssl x509 -in "$cert" -noout -checkhost "$host" 2>/dev/null || true)
+    if [[ "$host_check" != *"does match"* ]]; then
+      if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$host" == *:* ]]; then
+        ip_check=$(openssl x509 -in "$cert" -noout -checkip "$host" 2>/dev/null || true)
+        [[ "$ip_check" == *"does match"* ]] || { echo "san_no_cubre_${host}"; exit 1; }
+      else
+        echo "san_no_cubre_${host}"
+        exit 1
+      fi
+    fi
+    echo "ok"
+  args:
+    executable: /bin/bash
+  register: certs_external_validate
+  changed_when: false
+  failed_when: false
+  when: certs_mode == 'provided'
+
+- name: Fallar si el certificado externo provisto no es válido
+  ansible.builtin.fail:
+    msg: >-
+      Certificado provisto inválido: {{ certs_external_validate.stdout | trim }}
+      {{ certs_external_validate.stderr | trim }}
+  when:
+    - certs_mode == 'provided'
+    - certs_external_validate.rc | default(1) != 0
+
+- name: Ajustar permisos del certificado externo provisto
+  ansible.builtin.file:
+    path: "{{ certs_external_dir }}/{{ item }}"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: "{{ '0600' if item == 'privkey.pem' else '0644' }}"
+  loop:
+    - fullchain.pem
+    - privkey.pem
+  when: certs_mode == 'provided'
+
+# --- Permisos y facts -------------------------------------------------
+- name: Ajustar permisos de las claves privadas internas
+  ansible.builtin.file:
+    path: "{{ certs_internal_dir }}/{{ item }}"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0600'
+  loop:
+    - ca.key
+    - privkey.pem
+
+- name: Ajustar permisos de los certificados internos
+  ansible.builtin.file:
+    path: "{{ certs_internal_dir }}/{{ item }}"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  loop:
+    - ca.crt
+    - leaf.crt
+    - fullchain.pem
+
+- name: Ajustar permisos de las claves privadas externas generadas
+  ansible.builtin.file:
+    path: "{{ certs_external_dir }}/{{ item }}"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0600'
+  loop:
+    - ca.key
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+- name: Ajustar permisos de los certificados externos generados
+  ansible.builtin.file:
+    path: "{{ certs_external_dir }}/{{ item }}"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  loop:
+    - ca.crt
+    - leaf.crt
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_managed | bool
+
+- name: Ajustar permisos de la clave externa existente
+  ansible.builtin.file:
+    path: "{{ certs_external_dir }}/privkey.pem"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0600'
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_privkey_final.stat.exists | default(false)
+
+- name: Ajustar permisos del fullchain externo existente
+  ansible.builtin.file:
+    path: "{{ certs_external_dir }}/fullchain.pem"
+    owner: "{{ nombre_usuario }}"
+    group: "{{ nombre_usuario }}"
+    mode: '0644'
+  when:
+    - certs_mode == 'self_signed'
+    - certs_external_fullchain_final.stat.exists | default(false)
+
+- name: Registrar rutas y disponibilidad de los certificados
+  ansible.builtin.set_fact:
+    certs_external_enabled: "{{ (certs_mode in ['self_signed', 'provided']) | bool }}"
+    certs_external_fullchain: "{{ certs_external_dir }}/fullchain.pem"
+    certs_external_privkey: "{{ certs_external_dir }}/privkey.pem"
+    certs_internal_ca: "{{ certs_internal_dir }}/ca.crt"

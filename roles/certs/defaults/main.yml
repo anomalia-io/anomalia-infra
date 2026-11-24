@@ -1,42 +1,66 @@
 # =====================================================================
-# Configuración de certificados TLS del gateway
+# Configuración de certificados TLS
 # =====================================================================
 
-# Ruta donde se materializan los certificados consumidos por el gateway
+# Modo del certificado externo que sirve Nginx:
+#   self_signed -> Ansible genera CA + leaf (default, comportamiento histórico)
+#   provided    -> el operador provee fullchain.pem + privkey.pem
+#   disabled    -> Nginx publica solo HTTP; el TLS interno sigue existiendo
+certs_mode: "self_signed"
+
+# Raíz del material TLS. El certificado externo y el interno se mantienen
+# separados para que el certificado público no tenga que cubrir el nombre
+# interno que usa Parses.
 certs_dir: "/opt/anomalia/certs"
+certs_external_dir: "{{ certs_dir }}/external"
+certs_internal_dir: "{{ certs_dir }}/internal"
+certs_external_managed_marker: "{{ certs_external_dir }}/.managed-by-ansible"
 
-# Nombre principal (CN) del certificado
-certs_hostname: "anomalia.local"
+# Nombre principal (CN/SAN) del certificado externo.
+certs_hostname: "{{ backend_ip | default(ansible_default_ipv4.address | default('localhost')) }}"
 
-# Nombres alternativos adicionales cubiertos por el SAN.
-# anomalia_gw_tls es obligatorio: el proxy de datasources de Parses apunta al
-# gateway por TLS con ese nombre de servicio (spec 008 §3.2).
+# Nombres alternativos adicionales cubiertos por el SAN externo.
 certs_extra_dns:
+  - "anomalia.local"
   - "localhost"
-  - "anomalia_gw_tls"
 
-# Direcciones IP cubiertas por el SAN (acceso directo por IP)
-certs_ips:
+# Direcciones IP cubiertas por el SAN externo (acceso directo por IP).
+certs_ips: "{{ ['127.0.0.1', ansible_default_ipv4.address | default('127.0.0.1'), backend_ip | default(ansible_default_ipv4.address | default('127.0.0.1'))] | unique | list }}"
+
+# Certificado y clave provistos por el operador (solo certs_mode=provided).
+# Las rutas son locales al controlador salvo que certs_external_cert_remote_src
+# sea true, en cuyo caso se leen en el host destino.
+certs_external_cert: ""
+certs_external_key: ""
+certs_external_cert_remote_src: false
+
+# Certificado interno que valida Parses contra el proxy de datasources
+# (spec 008). Se genera siempre y nunca se reemplaza por el certificado externo.
+certs_internal_hostname: "anomalia_gw_tls"
+certs_internal_extra_dns:
+  - "localhost"
+certs_internal_ips:
   - "127.0.0.1"
 
-# Vigencia del certificado autofirmado (días)
+# Vigencia de los certificados generados (días)
 certs_days: 3650
 
 # Algoritmo y tamaño de clave
 certs_key_size: 4096
 
-# Regenera el material criptográfico aunque ya exista. Necesario cuando cambia
-# el SAN o la clave; destroy-infra.yml conserva el directorio de certificados,
-# por lo que sin esto un cambio de SAN no se aplicaría.
+# Regenera el material criptográfico generado aunque ya exista. No borra ni
+# reemplaza un certificado provisto en certs_mode=provided.
 certs_force: false
 
-# Distinguished name del leaf y de la CA privada
+# Distinguished name del leaf y de las CAs privadas
 certs_country: "AR"
 certs_state: "Buenos Aires"
 certs_locality: "Buenos Aires"
 certs_org: "Anomalia"
 certs_ou: "Platform"
 
-# CN de la CA privada que firma el leaf. Esa CA es el ancla de confianza que
-# consume el Secret de Parses (spec 008), por eso se materializa aparte.
+# CN de la CA que firma el certificado externo autofirmado.
 certs_ca_cn: "Anomalia Root CA"
+
+# CN de la CA interna que valida Parses.
+certs_internal_ca_cn: "Anomalia Internal CA"

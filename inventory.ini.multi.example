@@ -1,0 +1,93 @@
+# =====================================================================
+# Inventario para IMPLEMENTACIÓN REAL (varios servidores).
+#
+# Uso:
+#   cp inventory.ini.multi.example inventory.ini
+#   $EDITOR inventory.ini
+#   ./scripts/deploy.sh
+#
+# Reemplazá TODOS los 'HOST' por la IP real de cada servidor. Un mismo servidor
+# puede repetirse en varios grupos: usá el MISMO alias y la MISMA IP en todas
+# sus apariciones. No uses ansible_connection=local salvo que el servidor sea
+# la propia máquina donde corre Ansible.
+#
+# Credenciales SSH: agregá ansible_user y, si hace falta,
+# ansible_ssh_private_key_file en cada host, por ejemplo:
+#   backend-1 ansible_host=10.0.0.30 ansible_user=ubuntu \
+#     ansible_ssh_private_key_file=~/.ssh/id_ed25519 ...
+# =====================================================================
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+backend_port=8000
+victoria_firewall_docker_cidr="172.16.0.0/12"
+
+# TLS autofirmado: CN/SAN principal = IP del host backend (definida abajo).
+# Para dominio propio: certs_hostname="anomalia.mi-dominio.com" o --hostname.
+# certs_mode="self_signed"
+
+[all_nodes:children]
+vlogs_storage_nodes
+vlogs_insert_nodes
+vlogs_select_nodes
+vm_storage_nodes
+vm_insert_nodes
+vm_select_nodes
+vt_storage_nodes
+vt_insert_nodes
+vt_select_nodes
+pyroscope_nodes
+vmauth_nodes
+vmagent_nodes
+alertmanager_nodes
+vmalert_nodes
+backend_nodes
+parses_nodes
+
+[vlogs_storage_nodes]
+storage-1 ansible_host=HOST ansible_user=ubuntu vlstorage_port=8482 vlstorage_ip=HOST
+
+[vlogs_insert_nodes]
+insert-1 ansible_host=HOST ansible_user=ubuntu vlinsert_port=8480 vlinsert_ip=HOST
+
+[vlogs_select_nodes]
+select-1 ansible_host=HOST ansible_user=ubuntu vlselect_port=8481 vlselect_ip=HOST
+
+[vm_storage_nodes]
+storage-1 vmstorage_port=8402 vmstorage_ip=HOST
+
+[vm_insert_nodes]
+insert-1 vminsert_port=8400 vminsert_ip=HOST
+
+[vm_select_nodes]
+select-1 vmselect_port=8401 vmselect_ip=HOST
+
+[vt_storage_nodes]
+storage-1 vtstorage_port=8492 vtstorage_ip=HOST
+
+[vt_insert_nodes]
+insert-1 vtinsert_port=8490 vtinsert_ip=HOST
+
+[vt_select_nodes]
+select-1 vtselect_port=8491 vtselect_ip=HOST
+
+[pyroscope_nodes]
+edge-1 ansible_host=HOST ansible_user=ubuntu pyroscope_port=4040 pyroscope_ip=HOST
+
+[vmauth_nodes]
+edge-1 vmauth_port=8427 vmauth_ip=HOST
+
+[vmagent_nodes]
+edge-1 vmagent_port=8429 vmagent_ip=HOST
+
+[alertmanager_nodes]
+edge-1 alertmanager_port=9093 alertmanager_ip=HOST
+
+[vmalert_nodes]
+edge-1 vmalert_port=8880 vmalert_ip=HOST
+
+[backend_nodes]
+backend-1 ansible_host=HOST ansible_user=ubuntu backend_ip=HOST backend_port=8000
+
+[parses_nodes]
+parses-1 ansible_host=HOST ansible_user=ubuntu parses_ip=HOST parses_port=8090

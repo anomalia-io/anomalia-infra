@@ -37,39 +37,31 @@ Elegí **Linux / x64** y copiá el bloque `./config.sh --url ... --token <TOKEN>
 > `gh auth refresh -h github.com -s admin:org`
 > `gh api -X POST orgs/anomalia-io/actions/runners/registration-token -q .token`
 
-## Instalación (script)
+## Instalación manual
 
-```bash
-TOKEN=<token-de-registro> scripts/install-self-hosted-runner.sh
-```
+No hay un script `scripts/install-self-hosted-runner.sh` en este repo. Seguí las
+instrucciones oficiales que muestra GitHub al generar el token de registro:
 
-Opcionalmente fijar versión y etiquetas:
+1. Descargá el paquete del runner para **Linux / x64** y descomprimilo en
+   `~/actions-runner` (o el directorio que prefieras).
+2. Registralo con el comando `./config.sh --url ... --token <TOKEN>` que copiaste
+   de la web. Las etiquetas por defecto son `self-hosted`, `linux` y `x64`, que
+   alcanzan para el `runs-on: self-hosted` del workflow.
+3. Instalá y arrancá el servicio con `sudo ./svc.sh install` y `./svc.sh start`.
 
-```bash
-RUNNER_VERSION=2.331.0 RUNNER_LABELS="self-hosted,linux,x64,anomalia-deploy" \
-  TOKEN=<token> scripts/install-self-hosted-runner.sh
-```
-
-El script:
-
-- descarga el runner oficial (verificando `sha256` del manifest),
-- lo registra como servicio `systemd` (`svc.sh install` + `start`),
-- usa etiquetas por defecto `self-hosted,linux,x64,anomalia-deploy`.
-
-> El runner clona `anomalia-backend` por SSH, así que la clave del usuario
-> debe tener acceso de lectura a `anomalia-io/anomalia-backend` y el host
+> El runner clona `anomalia-backend` por SSH (rama `main`), así que la clave del
+> usuario debe tener acceso de lectura a `anomalia-io/anomalia-backend` y el host
 > `github.com` presente en `~/.ssh/known_hosts` (el deploy usa
 > `StrictHostKeyChecking=accept-new`).
 
-No requiere `sudo` para instalar el runner en sí (se instala en
-`~/actions-runner`), pero **sí** para registrar el servicio y para el
-`sudoers` del deploy.
+No requiere `sudo` para descomprimir y configurar el runner en sí, pero **sí** para
+instalar el servicio systemd y para el `sudoers` del deploy.
 
 ## Inventario y token en el workspace
 
 El deploy preserva dos archivos locales del workspace del runner:
 
-- `inventory.ini`: topología real de los nodos. Opciones:
+- `inventory.ini`: topología real de los nodos. Partí de `inventory.ini.local.example` (prueba local) o `inventory.ini.multi.example` (implementación real). Opciones:
   - dejarlo en `~/actions-runner/_work/anomalia-infra/anomalia-infra/inventory.ini`;
   - definirlo como secret `INVENTORY_INI` (el workflow lo materializa en cada
     corrida);
@@ -93,7 +85,7 @@ gh api orgs/anomalia-io/actions/runners -q '.runners[] | "\(.name) \(.status) \(
 Debe aparecer `online`. Luego, desde `anomalia-infra`:
 
 ```bash
-gh workflow run deploy.yml --repo anomalia-io/anomalia-infra
+gh workflow run deploy-selfhosted.yml --repo anomalia-io/anomalia-infra
 gh run watch --repo anomalia-io/anomalia-infra
 ```
 
@@ -104,5 +96,5 @@ gh run watch --repo anomalia-io/anomalia-infra
   (`--url https://github.com/anomalia-io/anomalia-infra`) en lugar de org.
 - El token de registro es efímero (expira en ~1h) y de un solo uso.
 - Revisar que ningún workflow de PR no confiable corra en el runner
-  self-hosted: `deploy.yml` sólo se dispara por `release: published` o
+  self-hosted: `deploy-selfhosted.yml` sólo se dispara por `release: published` o
   `workflow_dispatch` (nunca por PRs de forks).
