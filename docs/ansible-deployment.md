@@ -3,9 +3,11 @@
 El aprovisionamiento, actualización y destrucción de la infraestructura de observabilidad de Anomalia se gestiona íntegramente mediante playbooks y roles de **Ansible** (`anomalia-infra/`).
 
 Los playbooks raíz son `deploy-infra.yml` (stack completo), `deploy-tls.yml` (renovación de
-certificados sin bajar volúmenes) y `destroy-infra.yml` (limpieza explícita). El wrapper
-`./scripts/deploy.sh` es la forma recomendada de invocarlos: valida prerrequisitos e inventario,
-prepara el checkout del backend y ejecuta el playbook correspondiente.
+certificados sin bajar volúmenes), `destroy-infra.yml` (limpieza explícita) y
+`allocate-vmalert-port.yml` (selección remota de puerto para una unidad vmalert por-tenant).
+El wrapper `./scripts/deploy.sh` es la forma recomendada de invocar los playbooks de deploy:
+valida prerrequisitos e inventario, prepara el checkout del backend y ejecuta el playbook
+correspondiente.
 
 ---
 
@@ -113,6 +115,9 @@ cada host con motor; el firewall permite las IPs de todos los nodos del inventar
 
 - **Regeneración Incremental de Scrapes (`sync-scrapes.yml`):** Al desplegar o dar de baja una instancia vmalert por tenant, se encola automáticamente un proceso que regenera la configuración completa de `vmagent` y `vmauth` en los nodos correspondientes sin necesidad de reinstalar los binarios base.
 - **Sincronización de Reglas (`sync-vmalert-rules.yml`):** Permite materializar las reglas YAML almacenadas en la base de datos hacia las rutas dedicadas en cada nodo (`/etc/anomalia/vmalert/<tenant_slug>/alert_rules.yml`) aplicando recarga en caliente (`/-/reload`).
+- **Asignación remota de puerto (`allocate-vmalert-port.yml`):** antes del deploy por-tenant, el worker detiene `anomalia-vmalert-<tenant_slug>.service`, sondea los candidatos con `socket.bind(('0.0.0.0', puerto))` y lee `VMALERT_FREE_PORT=<puerto>` del stdout. Ya no se calcula `8880 + tenant_id`.
+- **Actualización de binarios (`install-binaries.yml`):** descarga por URL directa de releases con versiones fijadas —VictoriaLogs `v1.54.0`, VictoriaMetrics `v1.157.0`, VictoriaTraces `v0.13.0`, Pyroscope `v2.4.4` y Alertmanager `v0.35.1` (Parses sigue en `latest`)— sin consultar la API de GitHub. Con `servicio=vmalert` y `gestionar_servicios=true`, descubre `anomalia-vmalert-*.service` y reinicia **secuencialmente** esas unidades, sin tocar la unidad única cuando existen unidades por tenant.
+- **Etiqueta `tenant` en vmagent:** el template `roles/vmagent/templates/vmagent.yaml.j2` agrega el relabel `target_label: tenant` con `replacement` tomado de `tenant_slug` (`vi.tenant_slug | default("")`) en cada job `vmalert-<tenant_slug>`. Ese label es el que consumen Alertmanager y el backend para cerrar firing huérfanas.
 
 ### 5. Orden de Roles y Provisioning de Parses
 - El rol `parses` corre **antes** que el rol `backend` y espera readiness del puerto (`wait_for`): el gateway reprovisiona el proyecto de Parses al arrancar, por lo que Perses debe estar listo primero.

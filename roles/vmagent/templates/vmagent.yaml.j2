@@ -198,6 +198,8 @@ scrape_configs:
         replacement: vmalert
       - target_label: service
         replacement: vmalert
+      - target_label: tenant
+        replacement: '{{ vi.tenant_slug | default("") }}'
       - target_label: tenant_id
         replacement: '{{ vi.tenant_id | default("") }}'
       - target_label: tenant_slug

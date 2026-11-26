@@ -10,6 +10,8 @@ Los cambios en playbooks, roles, tasks o variables de inventario deben seguir el
    ```bash
    ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check
    ansible-playbook -i inventory.ini destroy-infra.yml --syntax-check
+   ansible-playbook -i inventory.ini allocate-vmalert-port.yml --syntax-check
+   ansible-playbook -i inventory.ini install-binaries.yml --syntax-check
    ```
 
 2. **Validar invariantes SSD** (`specs/013 §2-4`):
@@ -36,6 +38,8 @@ Los cambios en playbooks, roles, tasks o variables de inventario deben seguir el
    ```bash
    ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check
    ansible-playbook -i inventory.ini destroy-infra.yml --syntax-check
+   ansible-playbook -i inventory.ini allocate-vmalert-port.yml --syntax-check
+   ansible-playbook -i inventory.ini install-binaries.yml --syntax-check
    ```
 
 2. **Probar en entorno controlado** (opcional pero recomendado):
@@ -79,6 +83,8 @@ Los cambios en playbooks, roles, tasks o variables de inventario deben seguir el
 |------|-----------|
 | Syntax check deploy-infra.yml pasa | ✅ |
 | Syntax check destroy-infra.yml pasa | ✅ |
+| Syntax check allocate-vmalert-port.yml pasa | ✅ |
+| Syntax check install-binaries.yml pasa | ✅ |
 | Invariantes SSD (groups.get, idempotencia) | ✅ |
 | Topología flexible verificada | ✅ |
 | Sin hardcodeo de credenciales | ✅ |
@@ -91,6 +97,8 @@ Los cambios en playbooks, roles, tasks o variables de inventario deben seguir el
 # Syntax check (siempre antes de modificar)
 ansible-playbook -i inventory.ini deploy-infra.yml --syntax-check
 ansible-playbook -i inventory.ini destroy-infra.yml --syntax-check
+ansible-playbook -i inventory.ini allocate-vmalert-port.yml --syntax-check
+ansible-playbook -i inventory.ini install-binaries.yml --syntax-check
 
 # Probar en entorno controlado
 ansible-playbook -i inventory.ini deploy-infra.yml --check

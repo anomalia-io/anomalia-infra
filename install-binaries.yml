@@ -12,12 +12,12 @@
     gestionar_servicios: false
     nombre_usuario: "anomalia"
 
-    victorialogs_version: "latest"
-    victoriametrics_version: "latest"
-    victoriatraces_version: "latest"
-    pyroscope_version: "latest"
+    victorialogs_version: "v1.54.0"
+    victoriametrics_version: "v1.157.0"
+    victoriatraces_version: "v0.13.0"
+    pyroscope_version: "v2.4.4"
     parses_version: "latest"
-    alertmanager_version: "latest"
+    alertmanager_version: "v0.35.1"
 
   tasks:
     - name: Definir directorio temporal unico de esta corrida
@@ -51,29 +51,9 @@
     # 1. VICTORIALOGS (vlstorage, vlinsert, vlselect)
     # ==========================================
     - block:
-        - name: Consultar release de VictoriaLogs
-          ansible.builtin.uri:
-            url: "{{ 'https://api.github.com/repos/VictoriaMetrics/VictoriaLogs/releases/latest' if victorialogs_version == 'latest' else 'https://api.github.com/repos/VictoriaMetrics/VictoriaLogs/releases/tags/' + victorialogs_version }}"
-            return_content: yes
-            method: GET
-            status_code: 200
-            body_format: json
-            timeout: 30
-          register: vlogs_release
-          retries: 3
-          delay: 5
-
-        - name: Extraer URL de descarga para VictoriaLogs
-          set_fact:
-            vlogs_download_url: "{{ item.browser_download_url }}"
-          # La regex se define en vars: interpolar {{ }} dentro de un when:
-          # vuelve el condicional "unsafe" y Ansible aborta la tarea.
-          vars:
-            _pattern: "victoria-logs-linux-{{ anomalia_bin_arch }}-.*\\.tar\\.gz$"
-          loop: "{{ vlogs_release.json.assets }}"
-          when: 
-            - item.name is match(_pattern)
-            - item.name is not search("enterprise")
+        - name: Resolver URL de descarga para VictoriaLogs
+          ansible.builtin.set_fact:
+            vlogs_download_url: "https://github.com/VictoriaMetrics/VictoriaLogs/releases/download/{{ victorialogs_version }}/victoria-logs-linux-{{ anomalia_bin_arch }}-{{ victorialogs_version }}.tar.gz"
 
         - name: Descargar tarball de VictoriaLogs
           get_url:
@@ -128,29 +108,9 @@
     # 2. VICTORIAMETRICS CLUSTER (vmstorage, vminsert, vmselect)
     # ==========================================
     - block:
-        - name: Consultar release de VictoriaMetrics
-          ansible.builtin.uri:
-            url: "{{ 'https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/latest' if victoriametrics_version == 'latest' else 'https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/tags/' + victoriametrics_version }}"
-            return_content: yes
-            method: GET
-            status_code: 200
-            body_format: json
-            timeout: 30
-          register: vm_release
-          retries: 3
-          delay: 5
-
-        - name: Extraer URL de descarga para VictoriaMetrics Cluster
-          set_fact:
-            vmcluster_download_url: "{{ item.browser_download_url }}"
-          # La regex se define en vars: interpolar {{ }} dentro de un when:
-          # vuelve el condicional "unsafe" y Ansible aborta la tarea.
-          vars:
-            _pattern: "victoria-metrics-linux-{{ anomalia_bin_arch }}-.*-cluster\\.tar\\.gz$"
-          loop: "{{ vm_release.json.assets }}"
-          when: 
-            - item.name is match(_pattern)
-            - item.name is not search("enterprise")
+        - name: Resolver URL de descarga para VictoriaMetrics Cluster
+          ansible.builtin.set_fact:
+            vmcluster_download_url: "https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/{{ victoriametrics_version }}/victoria-metrics-linux-{{ anomalia_bin_arch }}-{{ victoriametrics_version }}-cluster.tar.gz"
 
         - name: Descargar tarball de VictoriaMetrics Cluster
           get_url:
@@ -205,29 +165,9 @@
     # 3. VICTORIATRACES (vtstorage, vtinsert, vtselect)
     # ==========================================
     - block:
-        - name: Consultar release de VictoriaTraces
-          ansible.builtin.uri:
-            url: "{{ 'https://api.github.com/repos/VictoriaMetrics/VictoriaTraces/releases/latest' if victoriatraces_version == 'latest' else 'https://api.github.com/repos/VictoriaMetrics/VictoriaTraces/releases/tags/' + victoriatraces_version }}"
-            return_content: yes
-            method: GET
-            status_code: 200
-            body_format: json
-            timeout: 30
-          register: vt_release
-          retries: 3
-          delay: 5
-
-        - name: Extraer URL de descarga para VictoriaTraces
-          set_fact:
-            vtcluster_download_url: "{{ item.browser_download_url }}"
-          # La regex se define en vars: interpolar {{ }} dentro de un when:
-          # vuelve el condicional "unsafe" y Ansible aborta la tarea.
-          vars:
-            _pattern: "victoria-traces-linux-{{ anomalia_bin_arch }}-.*\\.tar\\.gz$"
-          loop: "{{ vt_release.json.assets }}"
-          when: 
-            - item.name is match(_pattern)
-            - item.name is not search("enterprise")
+        - name: Resolver URL de descarga para VictoriaTraces
+          ansible.builtin.set_fact:
+            vtcluster_download_url: "https://github.com/VictoriaMetrics/VictoriaTraces/releases/download/{{ victoriatraces_version }}/victoria-traces-linux-{{ anomalia_bin_arch }}-{{ victoriatraces_version }}.tar.gz"
 
         - name: Descargar tarball de VictoriaTraces
           get_url:
@@ -282,29 +222,9 @@
     # 4. VMUTILS (vmagent, vmauth, vmalert)
     # ==========================================
     - block:
-        - name: Consultar release de VictoriaMetrics para vmutils
-          ansible.builtin.uri:
-            url: "{{ 'https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/latest' if victoriametrics_version == 'latest' else 'https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/tags/' + victoriametrics_version }}"
-            return_content: yes
-            method: GET
-            status_code: 200
-            body_format: json
-            timeout: 30
-          register: vmutils_release
-          retries: 3
-          delay: 5
-
-        - name: Extraer URL de descarga para vmutils
-          set_fact:
-            vmutils_download_url: "{{ item.browser_download_url }}"
-          # La regex se define en vars: interpolar {{ }} dentro de un when:
-          # vuelve el condicional "unsafe" y Ansible aborta la tarea.
-          vars:
-            _pattern: "vmutils-linux-{{ anomalia_bin_arch }}-.*\\.tar\\.gz$"
-          loop: "{{ vmutils_release.json.assets }}"
-          when: 
-            - item.name is match(_pattern)
-            - item.name is not search("enterprise")
+        - name: Resolver URL de descarga para vmutils
+          ansible.builtin.set_fact:
+            vmutils_download_url: "https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/{{ victoriametrics_version }}/vmutils-linux-{{ anomalia_bin_arch }}-{{ victoriametrics_version }}.tar.gz"
 
         - name: Descargar tarball de vmutils
           get_url:
@@ -334,6 +254,14 @@
             (inventory_hostname in groups.get(item.group, [])) or
             (servicio is defined and servicio == item.dest)
 
+        - name: Descubrir unidades vmalert por tenant en el nodo
+          ansible.builtin.find:
+            paths: /etc/systemd/system
+            patterns: "anomalia-vmalert-*.service"
+          register: vmalert_pt_units_update
+          changed_when: false
+          when: servicio is defined and servicio == 'vmalert'
+
         - name: Habilitar y reiniciar servicios systemd de vmutils
           systemd:
             name: "anomalia-{{ item.dest }}.service"
@@ -351,6 +279,21 @@
               (servicio is defined and servicio == item.dest)
             # En modo por-tenant la unit single no se toca (la gestiona el rol vmalert).
             - not (item.dest == 'vmalert' and vmalert_instances is defined and vmalert_instances | length > 0)
+            - not (item.dest == 'vmalert' and (vmalert_pt_units_update.files | default([])) | length > 0)
+
+        - name: Reiniciar unidades vmalert por tenant al actualizar el binario
+          ansible.builtin.systemd:
+            name: "{{ item.path | basename }}"
+            enabled: yes
+            state: restarted
+            daemon_reload: yes
+          loop: "{{ vmalert_pt_units_update.files | default([]) }}"
+          loop_control:
+            label: "{{ item.path | basename }}"
+          when:
+            - servicio is defined and servicio == 'vmalert'
+            - gestionar_servicios | bool
+            - (vmalert_pt_units_update.files | default([])) | length > 0
       when: >
         inventory_hostname in groups.get('vmagent_nodes', []) or
         inventory_hostname in groups.get('vmauth_nodes', []) or
@@ -376,27 +319,9 @@
     # 5. PYROSCOPE
     # ==========================================
     - block:
-        - name: Consultar release de Pyroscope
-          ansible.builtin.uri:
-            url: "{{ 'https://api.github.com/repos/grafana/pyroscope/releases/latest' if pyroscope_version == 'latest' else 'https://api.github.com/repos/grafana/pyroscope/releases/tags/' + pyroscope_version }}"
-            return_content: yes
-            method: GET
-            status_code: 200
-            body_format: json
-            timeout: 30
-          register: pyroscope_release
-          retries: 3
-          delay: 5
-
-        - name: Extraer URL de descarga para Pyroscope
-          set_fact:
-            pyroscope_download_url: "{{ item.browser_download_url }}"
-          # La regex se define en vars: interpolar {{ }} dentro de un when:
-          # vuelve el condicional "unsafe" y Ansible aborta la tarea.
-          vars:
-            _pattern: "pyroscope_.*_linux_{{ anomalia_bin_arch }}\\.tar\\.gz$"
-          loop: "{{ pyroscope_release.json.assets }}"
-          when: item.name is match(_pattern)
+        - name: Resolver URL de descarga para Pyroscope
+          ansible.builtin.set_fact:
+            pyroscope_download_url: "https://github.com/grafana/pyroscope/releases/download/{{ pyroscope_version }}/pyroscope_{{ pyroscope_version | regex_replace('^v', '') }}_linux_{{ anomalia_bin_arch }}.tar.gz"
 
         - name: Descargar tarball de Pyroscope
           get_url:
@@ -434,28 +359,10 @@
     # 6. ALERTMANAGER
     # ==========================================
     - block:
-        - name: Consultar release de Alertmanager
-          ansible.builtin.uri:
-            url: "{{ 'https://api.github.com/repos/prometheus/alertmanager/releases/latest' if alertmanager_version == 'latest' else 'https://api.github.com/repos/prometheus/alertmanager/releases/tags/' + alertmanager_version }}"
-            return_content: yes
-            method: GET
-            status_code: 200
-            body_format: json
-            timeout: 30
-          register: alertmanager_release
-          retries: 3
-          delay: 5
-
-        - name: Extraer URL de descarga para Alertmanager
-          set_fact:
-            alertmanager_download_url: "{{ item.browser_download_url }}"
-            alertmanager_folder_name: "{{ item.name | regex_replace('\\.tar\\.gz$', '') }}"
-          # La regex se define en vars: interpolar {{ }} dentro de un when:
-          # vuelve el condicional "unsafe" y Ansible aborta la tarea.
-          vars:
-            _pattern: "alertmanager-.*\\.linux-{{ anomalia_bin_arch }}\\.tar\\.gz$"
-          loop: "{{ alertmanager_release.json.assets }}"
-          when: item.name is match(_pattern)
+        - name: Resolver URL de descarga para Alertmanager
+          ansible.builtin.set_fact:
+            alertmanager_download_url: "https://github.com/prometheus/alertmanager/releases/download/{{ alertmanager_version }}/alertmanager-{{ alertmanager_version | regex_replace('^v', '') }}.linux-{{ anomalia_bin_arch }}.tar.gz"
+            alertmanager_folder_name: "alertmanager-{{ alertmanager_version | regex_replace('^v', '') }}.linux-{{ anomalia_bin_arch }}"
 
         - name: Descargar tarball de Alertmanager
           get_url:

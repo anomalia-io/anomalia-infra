@@ -1,0 +1,52 @@
+---
+- name: Seleccionar puerto libre para vmalert por-tenant
+  hosts: all
+  become: yes
+  gather_facts: false
+  tasks:
+    - name: Detener unidad existente antes de sondear el puerto
+      ansible.builtin.systemd:
+        name: "anomalia-vmalert-{{ vmalert_tenant_slug }}.service"
+        state: stopped
+        daemon_reload: yes
+      register: vmalert_stop_result
+      failed_when: >
+        vmalert_stop_result.failed and
+        ('could not find the requested service' not in (vmalert_stop_result.msg | lower | default(''))) and
+        ('does not exist' not in (vmalert_stop_result.msg | lower | default('')))
+
+    - name: Buscar primer puerto libre
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import socket
+            import sys
+
+            for raw in sys.argv[1].split(','):
+                if not raw:
+                    continue
+                try:
+                    port = int(raw)
+                except ValueError:
+                    continue
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    sock.bind(('0.0.0.0', port))
+                except OSError:
+                    continue
+                finally:
+                    sock.close()
+                print('VMALERT_FREE_PORT=%d' % port)
+                sys.exit(0)
+            sys.stderr.write('No hay puertos libres en la lista solicitada\n')
+            sys.exit(2)
+          - "{{ vmalert_port_candidates | join(',') }}"
+      register: vmalert_port_probe
+      changed_when: false
+      failed_when: vmalert_port_probe.rc != 0
+
+    - name: Mostrar puerto seleccionado
+      ansible.builtin.debug:
+        msg: "{{ vmalert_port_probe.stdout_lines | join(' ') }}"

@@ -400,6 +400,7 @@
     group: "{{ nombre_usuario }}"
     mode: '0644'
   loop:
+    - "allocate-vmalert-port.yml"
     - "install-binaries.yml"
     - "deploy-vmalert.yml"
     - "sync-vmalert-rules.yml"

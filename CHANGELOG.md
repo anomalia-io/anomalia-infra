@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protección contra sobreescritura: un `external/fullchain.pem` sin el marcador
   `.managed-by-ansible` se conserva como certificado provisto aunque el modo sea
   `self_signed`; `--tls-force` lo reemplaza.
+- `allocate-vmalert-port.yml`: asignación remota de puertos para unidades vmalert
+  por-tenant, con marcador `VMALERT_FREE_PORT=` en el stdout.
+- Relabel `tenant` derivado de `tenant_slug` en el template de vmagent, consumido
+  por Alertmanager y el backend para cerrar firing huérfanas.
 
 ### Changed
 - `scripts/deploy.sh` prepara una copia temporal del backend sin `.git`,
@@ -29,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.secrets/` entre corridas (`actions/checkout` con `clean: false`).
 - El gateway FastAPI TLS fue reemplazado por Nginx; el único contenedor FastAPI
   es `anomalia_gw` en `:8000`.
+- `install-binaries.yml` usa URLs directas de releases y versiones fijadas:
+  VictoriaLogs `v1.54.0`, VictoriaMetrics `v1.157.0`, VictoriaTraces `v0.13.0`,
+  Pyroscope `v2.4.4` y Alertmanager `v0.35.1` (Parses sigue en `latest`).
+- Con `servicio=vmalert` y `gestionar_servicios=true`, `install-binaries.yml`
+  descubre y reinicia **secuencialmente** las unidades vmalert por-tenant, sin
+  tocar la unidad única cuando existen unidades por tenant.
 
 ## [0.1.0] - 2026-10-20
 

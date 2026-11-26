@@ -25,6 +25,18 @@ ansible-playbook -i inventory.ini destroy-infra.yml                 # destrucci�
 gitleaks dir .                                                      # escaneo de secretos (obligatorio)
 ```
 
+Asignación de puerto y actualización de binarios (el worker las invoca con el inventario ad-hoc
+`-i '<ip>,'` cuando corresponda):
+
+```bash
+ansible-playbook -i '<ip>,' allocate-vmalert-port.yml \
+  -e vmalert_tenant_slug=mi-tenant \
+  -e '{"vmalert_port_candidates":[8881,8882,8883]}'  # imprime VMALERT_FREE_PORT=<puerto>
+
+ansible-playbook -i inventory.ini install-binaries.yml \
+  -e servicio=vmalert -e gestionar_servicios=true     # actualiza y reinicia unidades por-tenant en secuencia
+```
+
 `inventory.ini` **no se versiona** (ignorado). Usá `inventory.ini.local.example` para prueba local o `inventory.ini.multi.example` para implementación real.
 
 ## Invariantes (obligatorios)
